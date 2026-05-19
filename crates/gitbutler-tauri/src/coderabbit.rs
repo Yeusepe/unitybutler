@@ -1,14 +1,15 @@
 use std::{
     collections::HashMap,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
+        mpsc,
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, bail};
@@ -20,6 +21,9 @@ use serde_json::Value;
 use tauri::State;
 use tracing::instrument;
 
+const CODERABBIT_REVIEW_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const CODERABBIT_QUIET_UPDATE_AFTER: Duration = Duration::from_secs(15);
+
 #[derive(Default)]
 pub struct CodeRabbit {
     inner: Mutex<CodeRabbitState>,
@@ -29,11 +33,14 @@ pub struct CodeRabbit {
 struct CodeRabbitState {
     active: HashMap<String, ActiveReview>,
     findings: HashMap<String, Vec<CodeRabbitFinding>>,
+    last_review: HashMap<String, CodeRabbitReviewSummary>,
 }
 
 struct ActiveReview {
     review_id: String,
     cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<CodeRabbitReviewProgress>>,
+    findings: Arc<Mutex<Vec<CodeRabbitFinding>>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,7 +53,55 @@ pub struct CodeRabbitStatus {
     current_org: Option<String>,
     config_exists: bool,
     active_review_id: Option<String>,
+    active_progress: Option<CodeRabbitReviewProgress>,
+    last_review: Option<CodeRabbitReviewSummary>,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRabbitReviewProgress {
+    phase: String,
+    detail: String,
+    steps: Vec<CodeRabbitReviewStep>,
+    started_at_ms: u128,
+    updated_at_ms: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRabbitReviewStep {
+    label: String,
+    status: CodeRabbitReviewStepStatus,
+    detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodeRabbitReviewStepStatus {
+    Pending,
+    Running,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeRabbitReviewSummary {
+    review_id: String,
+    status: CodeRabbitReviewSummaryStatus,
+    message: String,
+    findings_count: usize,
+    completed_at_ms: u128,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CodeRabbitReviewSummaryStatus {
+    Complete,
+    NoFindings,
+    Failed,
+    Cancelled,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -138,17 +193,27 @@ pub async fn coderabbit_status(
 ) -> Result<CodeRabbitStatus, Error> {
     let workdir = project_workdir(project_id.clone())?;
     let project_key = project_id.to_string();
-    let active_review_id = coderabbit
-        .inner
-        .lock()
-        .active
-        .get(&project_key)
-        .map(|active| active.review_id.clone());
+    let (active_review_id, active_progress, last_review) = {
+        let inner = coderabbit.inner.lock();
+        (
+            inner
+                .active
+                .get(&project_key)
+                .map(|active| active.review_id.clone()),
+            inner
+                .active
+                .get(&project_key)
+                .map(|active| active.progress.lock().clone()),
+            inner.last_review.get(&project_key).cloned(),
+        )
+    };
 
-    tokio::task::spawn_blocking(move || status_for_workdir(&workdir, active_review_id))
-        .await
-        .context("failed to join CodeRabbit status task")?
-        .map_err(Into::into)
+    tokio::task::spawn_blocking(move || {
+        status_for_workdir(&workdir, active_review_id, active_progress, last_review)
+    })
+    .await
+    .context("failed to join CodeRabbit status task")?
+    .map_err(Into::into)
 }
 
 #[tauri::command(async)]
@@ -159,18 +224,26 @@ pub async fn coderabbit_login(
 ) -> Result<CodeRabbitStatus, Error> {
     let workdir = project_workdir(project_id.clone())?;
     let project_key = project_id.to_string();
-    let active_review_id = coderabbit
-        .inner
-        .lock()
-        .active
-        .get(&project_key)
-        .map(|active| active.review_id.clone());
+    let (active_review_id, active_progress, last_review) = {
+        let inner = coderabbit.inner.lock();
+        (
+            inner
+                .active
+                .get(&project_key)
+                .map(|active| active.review_id.clone()),
+            inner
+                .active
+                .get(&project_key)
+                .map(|active| active.progress.lock().clone()),
+            inner.last_review.get(&project_key).cloned(),
+        )
+    };
     tokio::task::spawn_blocking(move || {
         let _ = Command::new("coderabbit")
             .args(["auth", "login", "--agent"])
             .current_dir(&workdir)
             .status();
-        status_for_workdir(&workdir, active_review_id)
+        status_for_workdir(&workdir, active_review_id, active_progress, last_review)
     })
     .await
     .context("failed to join CodeRabbit login task")?
@@ -188,6 +261,8 @@ pub async fn coderabbit_review(
     let project_key = project_id.to_string();
     let review_id = request.review_id.clone().unwrap_or_else(new_review_id);
     let cancel = Arc::new(AtomicBool::new(false));
+    let progress = Arc::new(Mutex::new(CodeRabbitReviewProgress::new()));
+    let live_findings = Arc::new(Mutex::new(Vec::new()));
 
     {
         let mut inner = coderabbit.inner.lock();
@@ -201,11 +276,14 @@ pub async fn coderabbit_review(
             ActiveReview {
                 review_id: review_id.clone(),
                 cancel: cancel.clone(),
+                progress: progress.clone(),
+                findings: live_findings.clone(),
             },
         );
     }
 
     let project_id_for_findings = project_key.clone();
+    let project_id_for_summary = project_key.clone();
     let review_id_for_findings = review_id.clone();
     let result = tokio::task::spawn_blocking(move || {
         run_review(
@@ -214,6 +292,8 @@ pub async fn coderabbit_review(
             &review_id_for_findings,
             request,
             cancel,
+            progress,
+            live_findings,
         )
     })
     .await
@@ -224,12 +304,22 @@ pub async fn coderabbit_review(
     match result {
         Ok(findings) => {
             inner.findings.insert(project_key, findings.clone());
+            inner.last_review.insert(
+                project_id_for_summary.clone(),
+                CodeRabbitReviewSummary::completed(&review_id, findings.len()),
+            );
             Ok(CodeRabbitReviewResult {
                 review_id,
                 findings,
             })
         }
-        Err(err) => Err(err.into()),
+        Err(err) => {
+            inner.last_review.insert(
+                project_id_for_summary,
+                CodeRabbitReviewSummary::failed(&review_id, err.to_string()),
+            );
+            Err(err.into())
+        }
     }
 }
 
@@ -260,13 +350,21 @@ pub fn coderabbit_findings(
     review_id: Option<String>,
 ) -> Result<Vec<CodeRabbitFinding>, Error> {
     let project_key = project_id.to_string();
-    let mut findings = coderabbit
-        .inner
-        .lock()
-        .findings
-        .get(&project_key)
-        .cloned()
-        .unwrap_or_default();
+    let inner = coderabbit.inner.lock();
+    let mut findings = if let Some(active) = inner.active.get(&project_key)
+        && review_id
+            .as_ref()
+            .map(|review_id| review_id == &active.review_id)
+            .unwrap_or(true)
+    {
+        active.findings.lock().clone()
+    } else {
+        inner
+            .findings
+            .get(&project_key)
+            .cloned()
+            .unwrap_or_default()
+    };
     if let Some(review_id) = review_id {
         findings.retain(|finding| finding.review_id == review_id);
     }
@@ -282,6 +380,17 @@ pub fn coderabbit_update_finding(
 ) -> Result<Option<CodeRabbitFinding>, Error> {
     let project_key = project_id.to_string();
     let mut inner = coderabbit.inner.lock();
+    if let Some(active) = inner.active.get(&project_key) {
+        if let Some(finding) = active
+            .findings
+            .lock()
+            .iter_mut()
+            .find(|finding| finding.id == update.finding_id)
+        {
+            finding.status = update.status;
+            return Ok(Some(finding.clone()));
+        }
+    }
     let Some(findings) = inner.findings.get_mut(&project_key) else {
         return Ok(None);
     };
@@ -339,6 +448,8 @@ fn project_workdir(project_id: ProjectHandleOrLegacyProjectId) -> anyhow::Result
 fn status_for_workdir(
     workdir: &Path,
     active_review_id: Option<String>,
+    active_progress: Option<CodeRabbitReviewProgress>,
+    last_review: Option<CodeRabbitReviewSummary>,
 ) -> anyhow::Result<CodeRabbitStatus> {
     let version = Command::new("coderabbit")
         .arg("--version")
@@ -354,6 +465,8 @@ fn status_for_workdir(
             current_org: None,
             config_exists: workdir.join(".coderabbit.yaml").exists(),
             active_review_id,
+            active_progress,
+            last_review,
             error: Some("CodeRabbit CLI was not found on PATH".to_string()),
         });
     };
@@ -400,8 +513,94 @@ fn status_for_workdir(
         current_org,
         config_exists: workdir.join(".coderabbit.yaml").exists(),
         active_review_id,
+        active_progress,
+        last_review,
         error,
     })
+}
+
+impl CodeRabbitReviewProgress {
+    fn new() -> Self {
+        let now = now_ms();
+        Self {
+            phase: "Queued".to_string(),
+            detail: "Waiting to start CodeRabbit review.".to_string(),
+            steps: vec![
+                CodeRabbitReviewStep::pending("Prepare review scope"),
+                CodeRabbitReviewStep::pending("Prepare workflow instructions"),
+                CodeRabbitReviewStep::pending("Run CodeRabbit CLI"),
+                CodeRabbitReviewStep::pending("Parse inline recommendations"),
+            ],
+            started_at_ms: now,
+            updated_at_ms: now,
+        }
+    }
+}
+
+impl CodeRabbitReviewStep {
+    fn pending(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+            status: CodeRabbitReviewStepStatus::Pending,
+            detail: None,
+        }
+    }
+}
+
+impl CodeRabbitReviewSummary {
+    fn completed(review_id: &str, findings_count: usize) -> Self {
+        let (status, message) = if findings_count == 0 {
+            (
+                CodeRabbitReviewSummaryStatus::NoFindings,
+                "CodeRabbit completed with no recommendations.".to_string(),
+            )
+        } else {
+            (
+                CodeRabbitReviewSummaryStatus::Complete,
+                format!("CodeRabbit completed with {findings_count} recommendations."),
+            )
+        };
+        Self {
+            review_id: review_id.to_string(),
+            status,
+            message,
+            findings_count,
+            completed_at_ms: now_ms(),
+        }
+    }
+
+    fn failed(review_id: &str, message: String) -> Self {
+        let status = if message.contains("cancelled") {
+            CodeRabbitReviewSummaryStatus::Cancelled
+        } else {
+            CodeRabbitReviewSummaryStatus::Failed
+        };
+        Self {
+            review_id: review_id.to_string(),
+            status,
+            message,
+            findings_count: 0,
+            completed_at_ms: now_ms(),
+        }
+    }
+}
+
+fn set_progress(
+    progress: &Arc<Mutex<CodeRabbitReviewProgress>>,
+    phase: &str,
+    detail: &str,
+    step_index: usize,
+    step_status: CodeRabbitReviewStepStatus,
+    step_detail: Option<String>,
+) {
+    let mut progress = progress.lock();
+    progress.phase = phase.to_string();
+    progress.detail = detail.to_string();
+    progress.updated_at_ms = now_ms();
+    if let Some(step) = progress.steps.get_mut(step_index) {
+        step.status = step_status;
+        step.detail = step_detail.or_else(|| Some(detail.to_string()));
+    }
 }
 
 fn run_review(
@@ -410,7 +609,17 @@ fn run_review(
     review_id: &str,
     request: CodeRabbitReviewRequest,
     cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<CodeRabbitReviewProgress>>,
+    live_findings: Arc<Mutex<Vec<CodeRabbitFinding>>>,
 ) -> anyhow::Result<Vec<CodeRabbitFinding>> {
+    set_progress(
+        &progress,
+        "Preparing review",
+        "Resolving review scope and CodeRabbit CLI arguments.",
+        0,
+        CodeRabbitReviewStepStatus::Running,
+        None,
+    );
     let mut args = vec!["review".to_string(), "--agent".to_string()];
     args.push("--type".to_string());
     args.push(request.review_type);
@@ -427,13 +636,45 @@ fn run_review(
         args.push("--files".to_string());
         args.extend(files);
     }
+    set_progress(
+        &progress,
+        "Scope ready",
+        "Filtered skipped files and prepared the review request.",
+        0,
+        CodeRabbitReviewStepStatus::Complete,
+        None,
+    );
 
+    set_progress(
+        &progress,
+        "Preparing workflows",
+        "Writing temporary CodeRabbit instruction files for selected workflows.",
+        1,
+        CodeRabbitReviewStepStatus::Running,
+        None,
+    );
     let instruction_files = write_workflow_instruction_files(workdir, &request.workflows)?;
     for path in &instruction_files {
         args.push("-c".to_string());
         args.push(path.to_string_lossy().to_string());
     }
+    set_progress(
+        &progress,
+        "Workflows ready",
+        "Workflow instructions are ready.",
+        1,
+        CodeRabbitReviewStepStatus::Complete,
+        None,
+    );
 
+    set_progress(
+        &progress,
+        "Starting CodeRabbit",
+        "Launching `coderabbit review --agent`.",
+        2,
+        CodeRabbitReviewStepStatus::Running,
+        Some(format!("Command: coderabbit {}", args.join(" "))),
+    );
     let mut child = Command::new("coderabbit")
         .args(&args)
         .current_dir(workdir)
@@ -441,25 +682,136 @@ fn run_review(
         .stderr(Stdio::piped())
         .spawn()
         .context("failed to start CodeRabbit review")?;
+    set_progress(
+        &progress,
+        "CodeRabbit running",
+        "Waiting for CodeRabbit CLI to finish reviewing the selected scope.",
+        2,
+        CodeRabbitReviewStepStatus::Running,
+        None,
+    );
 
     let stdout = child.stdout.take().context("missing CodeRabbit stdout")?;
     let stderr = child.stderr.take().context("missing CodeRabbit stderr")?;
-    let stdout_thread = thread::spawn(move || read_to_string(stdout));
-    let stderr_thread = thread::spawn(move || read_to_string(stderr));
+    let (line_tx, line_rx) = mpsc::channel();
+    let stdout_thread = spawn_line_reader(stdout, false, line_tx.clone());
+    let stderr_thread = spawn_line_reader(stderr, true, line_tx);
+    let started_at = Instant::now();
+    let mut last_output_at = Instant::now();
+    let mut last_quiet_update_at = Instant::now();
+    let mut stdout = String::new();
+    let mut stderr = String::new();
 
     let status = loop {
+        while let Ok(line) = line_rx.try_recv() {
+            last_output_at = Instant::now();
+            if line.stderr {
+                stderr.push_str(&line.line);
+                stderr.push('\n');
+            } else {
+                handle_agent_stdout_line(
+                    &progress,
+                    &live_findings,
+                    project_id,
+                    review_id,
+                    &line.line,
+                );
+                stdout.push_str(&line.line);
+                stdout.push('\n');
+            }
+        }
+
         if cancel.load(Ordering::SeqCst) {
+            set_progress(
+                &progress,
+                "Cancelling review",
+                "Stopping the CodeRabbit CLI process.",
+                3,
+                CodeRabbitReviewStepStatus::Failed,
+                None,
+            );
             let _ = child.kill();
             bail!("CodeRabbit review was cancelled");
+        }
+        if started_at.elapsed() > CODERABBIT_REVIEW_TIMEOUT {
+            set_progress(
+                &progress,
+                "CodeRabbit timed out",
+                "CodeRabbit did not finish within the GitButler review timeout.",
+                2,
+                CodeRabbitReviewStepStatus::Failed,
+                Some(format!(
+                    "No completed result after {}.",
+                    format_duration(CODERABBIT_REVIEW_TIMEOUT)
+                )),
+            );
+            let _ = child.kill();
+            bail!(
+                "CodeRabbit review timed out after {}",
+                format_duration(CODERABBIT_REVIEW_TIMEOUT)
+            );
         }
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        thread::sleep(Duration::from_millis(100));
+        if last_output_at.elapsed() > CODERABBIT_QUIET_UPDATE_AFTER
+            && last_quiet_update_at.elapsed() > CODERABBIT_QUIET_UPDATE_AFTER
+        {
+            last_quiet_update_at = Instant::now();
+            set_progress(
+                &progress,
+                "CodeRabbit still running",
+                &format!(
+                    "Waiting for CodeRabbit CLI output. Last output was {} ago; total elapsed {}.",
+                    format_duration(last_output_at.elapsed()),
+                    format_duration(started_at.elapsed())
+                ),
+                2,
+                CodeRabbitReviewStepStatus::Running,
+                None,
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
     };
+    while let Ok(line) = line_rx.try_recv() {
+        if line.stderr {
+            stderr.push_str(&line.line);
+            stderr.push('\n');
+        } else {
+            handle_agent_stdout_line(&progress, &live_findings, project_id, review_id, &line.line);
+            stdout.push_str(&line.line);
+            stdout.push('\n');
+        }
+    }
+    set_progress(
+        &progress,
+        "Parsing results",
+        "CodeRabbit finished; parsing agent output into inline findings.",
+        2,
+        CodeRabbitReviewStepStatus::Complete,
+        None,
+    );
+    set_progress(
+        &progress,
+        "Parsing results",
+        "CodeRabbit finished; parsing agent output into inline findings.",
+        3,
+        CodeRabbitReviewStepStatus::Running,
+        None,
+    );
 
-    let stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+    while let Ok(line) = line_rx.try_recv() {
+        if line.stderr {
+            stderr.push_str(&line.line);
+            stderr.push('\n');
+        } else {
+            handle_agent_stdout_line(&progress, &live_findings, project_id, review_id, &line.line);
+            stdout.push_str(&line.line);
+            stdout.push('\n');
+        }
+    }
 
     for file in instruction_files {
         let _ = std::fs::remove_file(file);
@@ -474,13 +826,127 @@ fn run_review(
         bail!("CodeRabbit review failed: {message}");
     }
 
-    Ok(parse_findings(project_id, review_id, &stdout))
+    let findings = live_findings.lock().clone();
+    let detail = if findings.is_empty() {
+        "CodeRabbit completed and returned no findings.".to_string()
+    } else {
+        format!("CodeRabbit returned {} findings.", findings.len())
+    };
+    set_progress(
+        &progress,
+        "Review complete",
+        &detail,
+        3,
+        CodeRabbitReviewStepStatus::Complete,
+        None,
+    );
+    Ok(findings)
 }
 
-fn read_to_string(mut reader: impl Read) -> String {
-    let mut output = String::new();
-    let _ = reader.read_to_string(&mut output);
-    output
+struct CodeRabbitOutputLine {
+    stderr: bool,
+    line: String,
+}
+
+fn spawn_line_reader(
+    reader: impl Read + Send + 'static,
+    stderr: bool,
+    tx: mpsc::Sender<CodeRabbitOutputLine>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        for line in BufReader::new(reader).lines().map_while(Result::ok) {
+            if tx.send(CodeRabbitOutputLine { stderr, line }).is_err() {
+                break;
+            }
+        }
+    })
+}
+
+fn handle_agent_stdout_line(
+    progress: &Arc<Mutex<CodeRabbitReviewProgress>>,
+    live_findings: &Arc<Mutex<Vec<CodeRabbitFinding>>>,
+    project_id: &str,
+    review_id: &str,
+    line: &str,
+) {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        if !line.trim().is_empty() {
+            set_progress(
+                progress,
+                "CodeRabbit output",
+                line.trim(),
+                2,
+                CodeRabbitReviewStepStatus::Running,
+                Some(line.trim().to_string()),
+            );
+        }
+        return;
+    };
+
+    if let Some(finding) = normalize_finding_event(project_id, review_id, &value) {
+        let findings_count = {
+            let mut findings = live_findings.lock();
+            findings.push(finding);
+            findings.len()
+        };
+        set_progress(
+            progress,
+            "CodeRabbit running",
+            &format!("Received {findings_count} CodeRabbit recommendation(s) so far."),
+            2,
+            CodeRabbitReviewStepStatus::Running,
+            Some(format!("{findings_count} recommendation(s) received")),
+        );
+        return;
+    }
+
+    let Some(detail) = describe_agent_event(&value) else {
+        return;
+    };
+    set_progress(
+        progress,
+        "CodeRabbit running",
+        &detail,
+        2,
+        CodeRabbitReviewStepStatus::Running,
+        Some(detail.clone()),
+    );
+}
+
+fn describe_agent_event(value: &Value) -> Option<String> {
+    let event_type = string_at(value, &["/type", "/event", "/kind"]);
+    let phase = string_at(value, &["/phase", "/status", "/state"]);
+    let message = string_at(
+        value,
+        &[
+            "/message",
+            "/title",
+            "/summary",
+            "/detail",
+            "/description",
+            "/data/message",
+        ],
+    );
+
+    match (event_type.as_deref(), phase, message) {
+        (Some("finding"), _, _) => Some("Received a CodeRabbit recommendation.".to_string()),
+        (_, Some(phase), Some(message)) => Some(format!("{phase}: {message}")),
+        (_, Some(phase), None) => Some(phase),
+        (_, None, Some(message)) => Some(message),
+        (Some(event_type), None, None) => Some(format!("Received CodeRabbit event: {event_type}")),
+        _ => None,
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    if minutes == 0 {
+        format!("{seconds}s")
+    } else {
+        format!("{minutes}m {seconds:02}s")
+    }
 }
 
 fn write_workflow_instruction_files(
@@ -550,19 +1016,29 @@ fn should_skip_path(path: &str) -> bool {
         || lower.ends_with(".meta")
 }
 
+#[cfg(test)]
 fn parse_findings(project_id: &str, review_id: &str, stdout: &str) -> Vec<CodeRabbitFinding> {
     stdout
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|value| {
-            value
-                .get("type")
-                .and_then(Value::as_str)
-                .map(|kind| kind.eq_ignore_ascii_case("finding"))
-                .unwrap_or(false)
-        })
-        .filter_map(|value| normalize_finding(project_id, review_id, &value))
+        .filter_map(|value| normalize_finding_event(project_id, review_id, &value))
         .collect()
+}
+
+fn normalize_finding_event(
+    project_id: &str,
+    review_id: &str,
+    value: &Value,
+) -> Option<CodeRabbitFinding> {
+    let is_finding = value
+        .get("type")
+        .and_then(Value::as_str)
+        .map(|kind| kind.eq_ignore_ascii_case("finding"))
+        .unwrap_or(false);
+    if !is_finding {
+        return None;
+    }
+    normalize_finding(project_id, review_id, value)
 }
 
 fn normalize_finding(
@@ -654,11 +1130,14 @@ fn severity_at(value: &Value) -> CodeRabbitSeverity {
 }
 
 fn new_review_id() -> String {
-    let millis = SystemTime::now()
+    format!("{}-{}", now_ms(), uuid::Uuid::new_v4())
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
-        .unwrap_or_default();
-    format!("{millis}-{}", uuid::Uuid::new_v4())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

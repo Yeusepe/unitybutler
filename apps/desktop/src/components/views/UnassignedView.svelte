@@ -1,6 +1,5 @@
 <script lang="ts">
 	import WorktreeChanges from "$components/files/WorktreeChanges.svelte";
-	import CodeRabbitReviewButton from "$components/coderabbit/CodeRabbitReviewButton.svelte";
 	import UnassignedViewForgeIntegrationBanner from "$components/forge/ForgeIntegrationBanner.svelte";
 	import RulesList from "$components/rules/RulesList.svelte";
 	import UnassignedFoldButton from "$components/workspace/UnassignedFoldButton.svelte";
@@ -130,10 +129,6 @@
 
 			{#if changesToCommit}
 				<div class="create-new" use:focusable>
-					<CodeRabbitReviewButton
-						{projectId}
-						files={treeChanges.current.map((change) => change.path)}
-					/>
 					<Button
 						type="button"
 						wide
@@ -222,9 +217,7 @@
 
 	.create-new {
 		display: flex;
-		flex-direction: column;
 		padding: 12px 12px 14px 12px;
-		gap: 8px;
 		border-top: 1px solid var(--border-3);
 	}
 

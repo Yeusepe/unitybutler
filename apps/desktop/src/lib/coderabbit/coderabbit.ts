@@ -15,7 +15,33 @@ export type CodeRabbitStatus = {
 	currentOrg?: string;
 	configExists: boolean;
 	activeReviewId?: string;
+	activeProgress?: CodeRabbitReviewProgress;
+	lastReview?: CodeRabbitReviewSummary;
 	error?: string;
+};
+
+export type CodeRabbitReviewStepStatus = "pending" | "running" | "complete" | "failed";
+
+export type CodeRabbitReviewStep = {
+	label: string;
+	status: CodeRabbitReviewStepStatus;
+	detail?: string;
+};
+
+export type CodeRabbitReviewProgress = {
+	phase: string;
+	detail: string;
+	steps: CodeRabbitReviewStep[];
+	startedAtMs: number;
+	updatedAtMs: number;
+};
+
+export type CodeRabbitReviewSummary = {
+	reviewId: string;
+	status: "complete" | "noFindings" | "failed" | "cancelled";
+	message: string;
+	findingsCount: number;
+	completedAtMs: number;
 };
 
 export type CodeRabbitReviewRequest = {

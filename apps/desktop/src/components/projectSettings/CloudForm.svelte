@@ -1,4 +1,5 @@
 <script lang="ts">
+	import CodeRabbitSettings from "$components/coderabbit/CodeRabbitSettings.svelte";
 	import AiPromptSelect from "$components/projectSettings/AIPromptSelect.svelte";
 	import AccessTokenSignIn from "$components/shared/AccessTokenSignIn.svelte";
 	import SettingsSection from "$components/shared/SettingsSection.svelte";
@@ -95,4 +96,8 @@
 			>
 		</CardGroup.Item>
 	</CardGroup>
+
+	<Spacer margin={10} dotted />
+
+	<CodeRabbitSettings {projectId} />
 </SettingsSection>

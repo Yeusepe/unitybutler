@@ -6,6 +6,7 @@
 	import BranchDividerLine from "$components/branch/BranchDividerLine.svelte";
 	import BranchHeaderContextMenu from "$components/branch/BranchHeaderContextMenu.svelte";
 	import BranchReorderDropzone from "$components/branch/BranchReorderDropzone.svelte";
+	import CodeRabbitReviewButton from "$components/coderabbit/CodeRabbitReviewButton.svelte";
 	import CodegenSessionRow from "$components/codegen/CodegenSessionRow.svelte";
 	import ChangedFilesPanel from "$components/files/ChangedFilesPanel.svelte";
 	import PublishToTargetButton from "$components/forge/PublishToTargetButton.svelte";
@@ -200,6 +201,12 @@
 					}}
 				>
 					{#snippet buttons()}
+						<CodeRabbitReviewButton
+							{projectId}
+							reviewType={baseBranchName ? "committed" : "uncommitted"}
+							base={baseBranchName}
+							compact
+						/>
 						{#if first}
 							<Button
 								icon="stack-plus"

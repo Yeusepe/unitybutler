@@ -25,6 +25,8 @@
 		fileTemplate: Snippet<[TreeChange, number, number]>;
 		localIgnoredPaths?: string[];
 		active?: boolean;
+		expandRequest?: { id: number; expanded: boolean; root: TreeNode & { kind: "dir" } };
+		setFolderExpanded?: (node: TreeNode & { kind: "dir" }, expanded: boolean) => void;
 	};
 
 	let {
@@ -40,6 +42,8 @@
 		fileTemplate,
 		localIgnoredPaths = [],
 		active,
+		expandRequest,
+		setFolderExpanded,
 	}: Props = $props();
 
 	const idSelection = inject(FILE_SELECTION_MANAGER);
@@ -58,9 +62,32 @@
 	);
 
 	// Handler for toggling the folder
-	function handleToggle() {
-		isExpanded = !isExpanded;
+	function handleToggle(expanded: boolean, e: MouseEvent) {
+		if (node.kind !== "dir") return;
+		if (e.shiftKey) {
+			setFolderExpanded?.(node, expanded);
+		} else {
+			isExpanded = expanded;
+		}
 	}
+
+	function toggleFolderTree() {
+		if (node.kind !== "dir") return;
+		setFolderExpanded?.(node, !isExpanded);
+	}
+
+	function containsNode(root: TreeNode, target: TreeNode): boolean {
+		if (root === target) return true;
+		if (root.kind !== "dir") return false;
+		return root.children.some((child) => containsNode(child, target));
+	}
+
+	$effect(() => {
+		if (!expandRequest || node.kind !== "dir") return;
+		if (containsNode(expandRequest.root, node)) {
+			isExpanded = expandRequest.expanded;
+		}
+	});
 
 	// Selects all files nested under this folder node
 	function selectFolderContents(addToSelection = false) {
@@ -84,6 +111,10 @@
 
 	// Handler for clicking a folder — respects modifier keys for multi-select
 	function handleFolderClick(e: MouseEvent) {
+		if (e.shiftKey) {
+			toggleFolderTree();
+			return;
+		}
 		selectFolderContents(e.ctrlKey || e.metaKey || e.shiftKey);
 	}
 
@@ -135,6 +166,8 @@
 			{fileTemplate}
 			{localIgnoredPaths}
 			{active}
+			{expandRequest}
+			{setFolderExpanded}
 		/>
 	{/each}
 {:else if node.kind === "file"}
@@ -179,6 +212,8 @@
 				{fileTemplate}
 				{localIgnoredPaths}
 				{active}
+				{expandRequest}
+				{setFolderExpanded}
 			/>
 		{/each}
 	{/if}

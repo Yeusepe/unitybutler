@@ -26,7 +26,7 @@
 		focusableOpts?: FocusableOptions;
 		onclick?: (e: MouseEvent) => void;
 		onmousedown?: (e: MouseEvent) => void;
-		ontoggle?: (expanded: boolean) => void;
+		ontoggle?: (expanded: boolean, e: MouseEvent) => void;
 		testId?: string;
 	};
 

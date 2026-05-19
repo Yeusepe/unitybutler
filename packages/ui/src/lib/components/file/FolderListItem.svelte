@@ -24,7 +24,7 @@
 				currentTarget: EventTarget & HTMLInputElement;
 			},
 		) => void;
-		ontoggle?: (expanded: boolean) => void;
+		ontoggle?: (expanded: boolean, e: MouseEvent) => void;
 		onclick?: (e: MouseEvent) => void;
 		onkeydown?: (e: KeyboardEvent) => void;
 		onmousedown?: (e: MouseEvent) => void;
@@ -100,7 +100,7 @@
 			onclick={(e) => {
 				e.stopPropagation();
 				isExpanded = !isExpanded;
-				ontoggle?.(isExpanded);
+				ontoggle?.(isExpanded, e);
 			}}
 		>
 			<svg

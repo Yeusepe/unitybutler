@@ -15,7 +15,12 @@
 	import FileTreeFolder from "$components/files/FileTreeFolder.svelte";
 	import LazyList from "$components/shared/LazyList.svelte";
 	import { DEPENDENCY_SERVICE } from "$lib/dependencies/dependencyService.svelte";
-	import { abbreviateFolders, changesToFileTree, getAllChanges, nodePath } from "$lib/files/filetreeV3";
+	import {
+		abbreviateFolders,
+		changesToFileTree,
+		getAllChanges,
+		nodePath,
+	} from "$lib/files/filetreeV3";
 	import { isExecutableStatus } from "$lib/hunks/change";
 	import { getLockedCommitIds, getLockedTargets, isFileLocked } from "$lib/hunks/dependencies";
 	import {
@@ -103,6 +108,9 @@
 	const tree = $derived.by(() => abbreviateFolders(changesToFileTree(controller.changes)));
 	const localIgnoredPathSet = $derived(new Set(localIgnoredPaths));
 	let expandedFolders = $state.raw<Record<string, boolean>>({});
+	let expandRequest = $state<
+		{ id: number; expanded: boolean; root: TreeNode & { kind: "dir" } } | undefined
+	>();
 
 	type FileListRow =
 		| { type: "list"; change: TreeChange; index: number; depth: number }
@@ -158,6 +166,46 @@
 
 	function setFolderExpanded(path: string, expanded: boolean) {
 		expandedFolders = { ...expandedFolders, [path]: expanded };
+	}
+
+	function folderPaths(node: TreeNode & { kind: "dir" }): string[] {
+		const paths: string[] = [];
+
+		function visit(current: TreeNode) {
+			if (current.kind !== "dir" || current.parent === undefined) return;
+
+			paths.push(nodePath(current));
+			for (const child of current.children) {
+				visit(child);
+			}
+		}
+
+		visit(node);
+		return paths;
+	}
+
+	function setFolderTreeExpanded(node: TreeNode & { kind: "dir" }, expanded: boolean) {
+		const nextExpandedFolders = { ...expandedFolders };
+		for (const path of folderPaths(node)) {
+			nextExpandedFolders[path] = expanded;
+		}
+		expandedFolders = nextExpandedFolders;
+	}
+
+	function toggleFolder(
+		row: Extract<FileListRow, { type: "folder" }>,
+		expanded: boolean,
+		e: MouseEvent,
+	) {
+		if (e.shiftKey) {
+			setFolderTreeExpanded(row.node, expanded);
+		} else {
+			setFolderExpanded(row.path, expanded);
+		}
+	}
+
+	function setRecursiveFolderExpanded(node: TreeNode & { kind: "dir" }, expanded: boolean) {
+		expandRequest = { id: Date.now(), expanded, root: node };
 	}
 
 	function selectFolderContents(e: MouseEvent, row: Extract<FileListRow, { type: "folder" }>) {
@@ -295,7 +343,7 @@
 		isExpanded={expandedFolders[row.path] !== false}
 		showCheckbox={showCheckboxes && !locallyIgnored}
 		draggable={draggable && !locallyIgnored}
-		locallyIgnored={locallyIgnored}
+		{locallyIgnored}
 		node={row.node}
 		active={controller.active}
 		focusableOpts={{
@@ -305,8 +353,15 @@
 				selectFolderContents(syntheticEvent, row);
 			},
 		}}
-		onclick={(e) => selectFolderContents(e, row)}
-		ontoggle={(expanded) => setFolderExpanded(row.path, expanded)}
+		onclick={(e) => {
+			if (e.shiftKey) {
+				const expanded = expandedFolders[row.path] === false;
+				setFolderTreeExpanded(row.node, expanded);
+				return;
+			}
+			selectFolderContents(e, row);
+		}}
+		ontoggle={(expanded, e) => toggleFolder(row, expanded, e)}
 	/>
 {/snippet}
 
@@ -355,6 +410,8 @@
 				{fileTemplate}
 				active={controller.active}
 				{localIgnoredPaths}
+				{expandRequest}
+				setFolderExpanded={setRecursiveFolderExpanded}
 			/>
 		{:else}
 			<LazyList items={controller.changes} chunkSize={100}>

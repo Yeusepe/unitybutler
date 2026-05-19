@@ -36,6 +36,43 @@
 	function isFolderExpanded(path: string): boolean {
 		return folderExpanded.get(path) ?? true;
 	}
+
+	function folderPaths(node: TreeNode): string[] {
+		const paths: string[] = [];
+
+		function visit(current: TreeNode) {
+			if (current.kind !== "dir" || current.parent === undefined) return;
+
+			paths.push(nodePath(current));
+			for (const child of current.children) {
+				visit(child);
+			}
+		}
+
+		visit(node);
+		return paths;
+	}
+
+	function setFolderTreeExpanded(node: TreeNode, expanded: boolean) {
+		for (const path of folderPaths(node)) {
+			folderExpanded.set(path, expanded);
+		}
+	}
+
+	function handleFolderClick(node: TreeNode, e: MouseEvent) {
+		if (!e.shiftKey) return;
+
+		const expanded = !isFolderExpanded(nodePath(node));
+		setFolderTreeExpanded(node, expanded);
+	}
+
+	function handleFolderToggle(node: TreeNode, expanded: boolean, e: MouseEvent) {
+		if (e.shiftKey) {
+			setFolderTreeExpanded(node, expanded);
+		} else {
+			folderExpanded.set(nodePath(node), expanded);
+		}
+	}
 </script>
 
 {#snippet treeNodes(node: TreeNode, depth: number)}
@@ -66,7 +103,8 @@
 			name={node.name}
 			isExpanded={isFolderExpanded(nodePath(node))}
 			{depth}
-			ontoggle={(v) => folderExpanded.set(nodePath(node), v)}
+			onclick={(e) => handleFolderClick(node, e)}
+			ontoggle={(expanded, e) => handleFolderToggle(node, expanded, e)}
 		/>
 		{#if isFolderExpanded(nodePath(node))}
 			{#each node.children as child (child.name)}

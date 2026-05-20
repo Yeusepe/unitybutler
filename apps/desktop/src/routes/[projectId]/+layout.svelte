@@ -178,8 +178,9 @@
 	const uncommittedService = inject(UNCOMMITTED_SERVICE);
 	const idSelection = inject(FILE_SELECTION_MANAGER);
 
+	const worktreeDataFileListQuery = $derived(worktreeService.worktreeDataFileList(projectId));
 	const worktreeDataQuery = $derived(worktreeService.worktreeData(projectId));
-	const worktreeData = $derived(worktreeDataQuery.response);
+	const worktreeData = $derived(worktreeDataQuery.response ?? worktreeDataFileListQuery.response);
 
 	// Bridge between RTKQ and custom slice
 	$effect(() => {

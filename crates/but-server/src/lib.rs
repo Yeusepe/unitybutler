@@ -777,6 +777,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
             "/changes_in_worktree",
             but_post(diff::changes_in_worktree_cmd),
         )
+        .route(
+            "/changes_in_worktree_tracked_file_list",
+            but_post(diff::changes_in_worktree_tracked_file_list_cmd),
+        )
         .route("/assign_hunk", but_post(diff::assign_hunk_cmd))
         .route(
             "/cherry_apply_status",

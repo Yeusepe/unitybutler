@@ -33,6 +33,12 @@ export type WorktreeData = {
 export function buildWorktreeEndpoints(build: BackendEndpointBuilder) {
 	return {
 		// ── Worktree Changes ────────────────────────────────────────
+		worktreeChangesFileList: build.query<WorktreeData, { projectId: string }>({
+			extraOptions: { command: "changes_in_worktree_tracked_file_list" },
+			query: (args) => args,
+			providesTags: [providesList(ReduxTag.WorktreeChanges)],
+			transformResponse: transformWorktreeChanges,
+		}),
 		worktreeChanges: build.query<WorktreeData, { projectId: string }>({
 			extraOptions: { command: "changes_in_worktree" },
 			query: (args) => args,
@@ -61,34 +67,7 @@ export function buildWorktreeEndpoints(build: BackendEndpointBuilder) {
 				await lifecycleApi.cacheEntryRemoved;
 				unsubscribe();
 			},
-			transformResponse(response: WorktreeChanges) {
-				if (shouldRaiseDependencyError(response.dependenciesError)) {
-					showError(
-						"Failed to compute dependencies",
-						response.dependenciesError.description,
-						undefined,
-						"worktree-dependencies-error",
-					);
-				}
-
-				if (shouldRaiseHunkAssignmentError(response.assignmentsError)) {
-					showError(
-						"Failed to compute hunk assignments",
-						response.assignmentsError.description,
-						undefined,
-						"worktree-assignments-error",
-					);
-				}
-
-				return {
-					changes: worktreeAdapter.addMany(worktreeAdapter.getInitialState(), response.changes),
-					rawChanges: response.changes,
-					ignoredChanges: response.ignoredChanges,
-					hunkAssignments: response.assignments,
-					dependencies: response.dependencies ?? undefined,
-					dependenciesError: response.dependenciesError ?? undefined,
-				};
-			},
+			transformResponse: transformWorktreeChanges,
 		}),
 		localIgnoredPaths: build.query<string[], { projectId: string }>({
 			extraOptions: { command: "list_local_ignored_paths" },
@@ -162,6 +141,35 @@ const worktreeAdapter = createEntityAdapter<TreeChange, string>({
 	selectId: (change) => change.path,
 	sortComparer: (a, b) => a.path.localeCompare(b.path),
 });
+
+function transformWorktreeChanges(response: WorktreeChanges): WorktreeData {
+	if (shouldRaiseDependencyError(response.dependenciesError)) {
+		showError(
+			"Failed to compute dependencies",
+			response.dependenciesError.description,
+			undefined,
+			"worktree-dependencies-error",
+		);
+	}
+
+	if (shouldRaiseHunkAssignmentError(response.assignmentsError)) {
+		showError(
+			"Failed to compute hunk assignments",
+			response.assignmentsError.description,
+			undefined,
+			"worktree-assignments-error",
+		);
+	}
+
+	return {
+		changes: worktreeAdapter.addMany(worktreeAdapter.getInitialState(), response.changes),
+		rawChanges: response.changes,
+		ignoredChanges: response.ignoredChanges,
+		hunkAssignments: response.assignments,
+		dependencies: response.dependencies ?? undefined,
+		dependenciesError: response.dependenciesError ?? undefined,
+	};
+}
 
 export const worktreeSelectors = {
 	...worktreeAdapter.getSelectors(),

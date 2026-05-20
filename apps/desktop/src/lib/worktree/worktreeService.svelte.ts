@@ -67,6 +67,13 @@ export class WorktreeService {
 		);
 	}
 
+	worktreeDataFileList(projectId: string) {
+		return this.backendApi.endpoints.worktreeChangesFileList.useQuery(
+			{ projectId },
+			{ transform: (res) => this.filterLocallyIgnoredWorktreeData(projectId, res) },
+		);
+	}
+
 	localIgnoredPaths(projectId: string) {
 		return this.backendApi.endpoints.localIgnoredPaths.useQuery(
 			{ projectId },

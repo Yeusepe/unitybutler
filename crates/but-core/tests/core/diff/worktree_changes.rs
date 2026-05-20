@@ -219,6 +219,52 @@ fn untracked_in_unborn() -> Result<()> {
 }
 
 #[test]
+fn tracked_no_renames_omits_untracked_files() -> Result<()> {
+    let tmp = gix_testtools::tempfile::TempDir::new()?;
+    git_at_dir(tmp.path()).arg("init").run();
+    let repo = open_repo(tmp.path())?;
+    std::fs::write(repo.workdir().expect("worktree").join("untracked"), "")?;
+
+    let actual = diff::worktree_changes_tracked_no_renames(&repo)?;
+    assert!(
+        actual.changes.is_empty(),
+        "untracked files are intentionally omitted from the fast file-list path"
+    );
+    assert!(
+        actual.ignored_changes.is_empty(),
+        "untracked files should not become ignored changes in the fast path"
+    );
+    Ok(())
+}
+
+#[test]
+fn tracked_no_renames_keeps_index_changes() -> Result<()> {
+    let tmp = gix_testtools::tempfile::TempDir::new()?;
+    git_at_dir(tmp.path()).arg("init").run();
+    let repo = open_repo(tmp.path())?;
+    std::fs::write(repo.workdir().expect("worktree").join("added"), "")?;
+    git(&repo).args(["add", "."]).run();
+
+    let actual = diff::worktree_changes_tracked_no_renames(&repo)?;
+    assert_eq!(
+        actual.changes.len(),
+        1,
+        "tracked index changes should remain visible without untracked enumeration"
+    );
+    assert!(
+        !matches!(
+            actual.changes[0].status,
+            but_core::TreeStatus::Addition {
+                is_untracked: true,
+                ..
+            }
+        ),
+        "index additions are not untracked"
+    );
+    Ok(())
+}
+
+#[test]
 fn added_in_unborn() -> Result<()> {
     let repo = repo("added-unborn")?;
     let actual = diff::worktree_changes(&repo)?;

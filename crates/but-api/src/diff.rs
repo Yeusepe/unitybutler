@@ -14,6 +14,8 @@ boolean_enums::gen_boolean_enum!(pub serde ComputeLineStats);
 
 use but_core::diff::CommitDetails;
 
+use crate::local_ignores;
+
 /// JSON types
 // TODO: add schemars
 pub mod json {
@@ -111,6 +113,25 @@ pub fn changes_in_worktree(ctx: &Context) -> anyhow::Result<WorktreeChanges> {
     changes_in_worktree_with_perm(ctx, guard.read_permission())
 }
 
+/// Fast file-list preview of tracked worktree changes.
+///
+/// This intentionally skips untracked-file enumeration, hunk assignments, and
+/// dependency calculation. Use [`changes_in_worktree()`] when the caller needs
+/// complete commit-ready data.
+#[but_api(napi)]
+#[instrument(skip_all, err(Debug))]
+pub fn changes_in_worktree_tracked_file_list(ctx: &Context) -> anyhow::Result<WorktreeChanges> {
+    let guard = ctx.shared_worktree_access();
+    let repo = ctx.repo.get()?;
+    let _perm = guard.read_permission();
+    let locally_ignored_paths = local_ignores::list_local_ignored_paths(&repo)?;
+    let changes = local_ignores::filter_locally_ignored_worktree_changes(
+        but_core::diff::worktree_changes_tracked_no_renames(&repo)?,
+        &locally_ignored_paths,
+    );
+    Ok(changes.into())
+}
+
 /// This UI-version of [`but_core::diff::worktree_changes()`] simplifies the `git status` information for display in
 /// the user interface as it is right now. From here, it's always possible to add more information as the need arises.
 ///
@@ -135,7 +156,11 @@ pub fn changes_in_worktree_with_perm(
 
     let (repo, ws, mut db) = ctx.workspace_and_db_mut_with_perm(perm)?;
 
-    let changes = but_core::diff::worktree_changes(&repo)?;
+    let locally_ignored_paths = local_ignores::list_local_ignored_paths(&repo)?;
+    let changes = local_ignores::filter_locally_ignored_worktree_changes(
+        but_core::diff::worktree_changes_no_renames(&repo)?,
+        &locally_ignored_paths,
+    );
 
     let dependencies = hunk_dependencies_for_workspace_changes_by_worktree_dir(
         &repo,

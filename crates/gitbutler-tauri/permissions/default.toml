@@ -20,6 +20,7 @@ commands.allow = [
   "build_type",
   "canned_branch_name",
   "changes_in_worktree",
+  "changes_in_worktree_tracked_file_list",
   "check_github_auth_status",
   "check_signing_settings",
   "cherry_apply",

@@ -8,7 +8,7 @@ use gix::{
     object::tree::EntryKind,
     status,
     status::{
-        index_worktree,
+        UntrackedFiles, index_worktree,
         index_worktree::RewriteSource,
         plumbing::index_as_worktree::{self, EntryStatus},
         tree_index::TrackRenames,
@@ -36,13 +36,21 @@ enum Origin {
 /// to get a commit with a tree equal to the current worktree.
 #[instrument(skip(repo), err(Debug))]
 pub fn worktree_changes(repo: &gix::Repository) -> anyhow::Result<WorktreeChanges> {
-    worktree_changes_inner(repo, RenameTracking::Always)
+    worktree_changes_inner(repo, RenameTracking::Always, UntrackedFiles::Files)
 }
 
 /// Just like [`worktree_changes()`], but don't do any rename tracking for performance.
 #[instrument(skip(repo), err(Debug))]
 pub fn worktree_changes_no_renames(repo: &gix::Repository) -> anyhow::Result<WorktreeChanges> {
-    worktree_changes_inner(repo, RenameTracking::Disabled)
+    worktree_changes_inner(repo, RenameTracking::Disabled, UntrackedFiles::Files)
+}
+
+/// Just like [`worktree_changes_no_renames()`], but don't enumerate untracked files for fast file-list previews.
+#[instrument(skip(repo), err(Debug))]
+pub fn worktree_changes_tracked_no_renames(
+    repo: &gix::Repository,
+) -> anyhow::Result<WorktreeChanges> {
+    worktree_changes_inner(repo, RenameTracking::Disabled, UntrackedFiles::None)
 }
 
 enum RenameTracking {
@@ -53,6 +61,7 @@ enum RenameTracking {
 fn worktree_changes_inner(
     repo: &gix::Repository,
     renames: RenameTracking,
+    untracked_files: UntrackedFiles,
 ) -> anyhow::Result<WorktreeChanges> {
     let (tree_index_rewrites, worktree_rewrites) = match renames {
         RenameTracking::Always => {
@@ -72,6 +81,7 @@ fn worktree_changes_inner(
     });
     let status_changes = repo
         .status(gix::progress::Discard)?
+        .untracked_files(untracked_files)
         .tree_index_track_renames(tree_index_rewrites)
         .index_worktree_rewrites(worktree_rewrites)
         // Learn about submodule changes, but only do the cheap checks, showing only what we could commit.

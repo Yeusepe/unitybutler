@@ -357,6 +357,8 @@
 
 	function unityAutofixMessage(outcome: {
 		forceTextUpdated: boolean;
+		unityYamlMergeMergetoolConfigured: boolean;
+		lfsUnityYamlMergeDriverConfigured: boolean;
 		unityYamlMergeDriverRemoved: boolean;
 		locallyIgnoredPathsAdded: number;
 		remainingHeadsup?: string;
@@ -364,6 +366,12 @@
 		const fixes = [];
 		if (outcome.forceTextUpdated) {
 			fixes.push("Set scene asset serialization to Force Text.");
+		}
+		if (outcome.unityYamlMergeMergetoolConfigured) {
+			fixes.push("Configured UnityYAMLMerge as the local Git mergetool.");
+		}
+		if (outcome.lfsUnityYamlMergeDriverConfigured) {
+			fixes.push("Configured the local Git LFS text merge driver for Unity scenes and prefabs.");
 		}
 		if (outcome.unityYamlMergeDriverRemoved) {
 			fixes.push("Removed the local merge driver override; use git mergetool for scene conflicts.");

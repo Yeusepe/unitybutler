@@ -14,6 +14,10 @@ use tracing::instrument;
 
 use crate::local_ignores;
 
+const LFS_UNITYYAMLMERGE_DRIVER: &str = "lfs-unityyamlmerge";
+const LFS_UNITYYAMLMERGE_NAME: &str = "Git LFS + UnityYAMLMerge";
+const UNITY_LFS_TEXT_ATTRIBUTES: &str = "*.unity  filter=lfs diff=lfs merge=lfs-unityyamlmerge -text\n*.prefab filter=lfs diff=lfs merge=lfs-unityyamlmerge -text";
+
 #[but_api]
 #[instrument(err(Debug))]
 pub fn update_project(
@@ -169,6 +173,10 @@ pub fn prepare_project_for_activation(ctx: &mut Context) -> Result<()> {
 pub struct UnityAutofixOutcome {
     /// Whether `ProjectSettings/EditorSettings.asset` was changed to Force Text serialization.
     pub force_text_updated: bool,
+    /// Whether UnityYAMLMerge was configured as the regular Git mergetool for non-LFS conflicts.
+    pub unity_yaml_merge_mergetool_configured: bool,
+    /// Whether the LFS-backed UnityYAMLMerge text merge driver was configured locally.
+    pub lfs_unity_yaml_merge_driver_configured: bool,
     /// Whether unsafe low-level UnityYAMLMerge driver config was removed from local Git config.
     pub unity_yaml_merge_driver_removed: bool,
     /// Number of filter-managed tracked paths added to GitButler's repo-local ignore list.
@@ -185,6 +193,8 @@ pub fn autofix_unity_project(ctx: &Context) -> Result<UnityAutofixOutcome> {
     let Some(workdir) = repo.workdir() else {
         return Ok(UnityAutofixOutcome {
             force_text_updated: false,
+            unity_yaml_merge_mergetool_configured: false,
+            lfs_unity_yaml_merge_driver_configured: false,
             unity_yaml_merge_driver_removed: false,
             locally_ignored_paths_added: 0,
             remaining_headsup: None,
@@ -193,6 +203,8 @@ pub fn autofix_unity_project(ctx: &Context) -> Result<UnityAutofixOutcome> {
     if !looks_like_unity_project(workdir) {
         return Ok(UnityAutofixOutcome {
             force_text_updated: false,
+            unity_yaml_merge_mergetool_configured: false,
+            lfs_unity_yaml_merge_driver_configured: false,
             unity_yaml_merge_driver_removed: false,
             locally_ignored_paths_added: 0,
             remaining_headsup: None,
@@ -200,14 +212,21 @@ pub fn autofix_unity_project(ctx: &Context) -> Result<UnityAutofixOutcome> {
     }
 
     let force_text_updated = set_unity_asset_serialization_to_force_text(workdir)?;
+    let merge_tool_setup = ensure_unity_merge_tools_are_configured(&repo, workdir, None)?;
     let unity_yaml_merge_driver_removed = remove_unityyamlmerge_driver(&repo)?;
-    let filter_paths = worktree_filter_paths(&repo)?;
+    let filter_paths = autofix_filter_paths(&repo)?;
     let filter_paths = filter_paths.iter().map(Path::new).collect::<Vec<&Path>>();
     let locally_ignored_paths_added =
         local_ignores::set_local_ignored_paths(&repo, filter_paths, true)?;
 
     Ok(UnityAutofixOutcome {
         force_text_updated,
+        unity_yaml_merge_mergetool_configured: merge_tool_setup
+            .as_ref()
+            .is_some_and(|setup| setup.mergetool_configured),
+        lfs_unity_yaml_merge_driver_configured: merge_tool_setup
+            .as_ref()
+            .is_some_and(|setup| setup.lfs_text_driver_configured),
         unity_yaml_merge_driver_removed,
         locally_ignored_paths_added,
         remaining_headsup: join_headsup_messages([
@@ -233,6 +252,7 @@ pub fn project_filter_headsup(repo: &gix::Repository) -> anyhow::Result<Option<S
     let files_with_filter = files_with_filter
         .into_iter()
         .filter(|path| !path_is_locally_ignored(path, &locally_ignored_paths))
+        .filter(|path| !path_is_configured_lfs_unity_text_merge_path(repo, path))
         .collect::<Vec<_>>();
 
     if all_filters.is_empty() || files_with_filter.is_empty() {
@@ -280,13 +300,22 @@ fn project_activation_headsup_with_unityyamlmerge_path(
     let mut notices = Vec::new();
     let mut warnings = Vec::new();
 
-    let auto_configured_unityyamlmerge_path =
-        ensure_unityyamlmerge_is_configured(repo, workdir, unityyamlmerge_path)?;
-    if let Some(path) = &auto_configured_unityyamlmerge_path {
-        notices.push(format!(
-            "Configured UnityYAMLMerge mergetool in local Git config using `{}`.",
-            path.display()
-        ));
+    let merge_tool_setup =
+        ensure_unity_merge_tools_are_configured(repo, workdir, unityyamlmerge_path)?;
+    if let Some(setup) = &merge_tool_setup {
+        if setup.mergetool_configured {
+            notices.push(format!(
+                "Configured UnityYAMLMerge mergetool in local Git config using `{}`.",
+                setup.tool_path.display()
+            ));
+        }
+        if setup.lfs_text_driver_configured {
+            notices.push(format!(
+                "Configured `{}` as a local Git LFS text merge driver using `{}`.",
+                LFS_UNITYYAMLMERGE_DRIVER,
+                setup.tool_path.display()
+            ));
+        }
     }
 
     let editor_settings_path = workdir.join("ProjectSettings").join("EditorSettings.asset");
@@ -302,7 +331,13 @@ fn project_activation_headsup_with_unityyamlmerge_path(
 
     let gitattributes_path = workdir.join(".gitattributes");
     if let Some(gitattributes) = read_optional_text_file(&gitattributes_path)? {
-        if auto_configured_unityyamlmerge_path.is_none()
+        let lfs_text_merge_driver_available = merge_tool_setup
+            .as_ref()
+            .is_some_and(|setup| setup.lfs_text_driver_configured)
+            || lfs_text_merge_driver_is_configured(repo, LFS_UNITYYAMLMERGE_DRIVER);
+        if merge_tool_setup
+            .as_ref()
+            .is_none_or(|setup| !setup.mergetool_configured)
             && gitattributes.contains("merge=unityyamlmerge")
             && !unityyamlmerge_mergetool_is_configured(repo)
         {
@@ -325,21 +360,63 @@ fn project_activation_headsup_with_unityyamlmerge_path(
             );
         }
 
-        let lfs_managed_unity_paths = lfs_managed_unity_paths(&gitattributes);
-        if !lfs_managed_unity_paths.is_empty() {
+        let lfs_unity_attributes = lfs_managed_unity_attributes(&gitattributes);
+        let lfs_unity_text_attributes = lfs_unity_attributes
+            .iter()
+            .filter(|attribute| attribute.is_scene_or_prefab())
+            .collect::<Vec<_>>();
+        let lfs_unity_text_paths = lfs_unity_text_attributes
+            .iter()
+            .map(|attribute| attribute.pattern.as_str())
+            .collect::<Vec<_>>();
+        if !lfs_unity_text_paths.is_empty() {
+            let attributes_with_default_lfs_merge = lfs_unity_text_attributes
+                .iter()
+                .filter(|attribute| attribute.merge.as_deref() != Some(LFS_UNITYYAMLMERGE_DRIVER))
+                .map(|attribute| attribute.pattern.as_str())
+                .collect::<Vec<_>>();
+            if !attributes_with_default_lfs_merge.is_empty() {
+                let protected_scenes = protected_scene_paths(workdir, &gitattributes)?
+                    .into_iter()
+                    .filter(|path| !path_is_locally_ignored(path, &locally_ignored_paths))
+                    .collect::<Vec<_>>();
+                warnings.push(format!(
+                    "Unity scene or prefab paths are stored in Git LFS but are not configured for \
+                     LFS-backed Smart Merge ({patterns}). Use `merge={driver}` for mergeable \
+                     text-serialized Unity files. Recommended `.gitattributes`:\n{snippet}{examples}",
+                    patterns = attributes_with_default_lfs_merge.join(", "),
+                    driver = LFS_UNITYYAMLMERGE_DRIVER,
+                    snippet = UNITY_LFS_TEXT_ATTRIBUTES,
+                    examples = format_examples(&protected_scenes)
+                ));
+            } else if !lfs_text_merge_driver_available {
+                warnings.push(format!(
+                    "`.gitattributes` uses `merge={driver}` for Unity LFS scene or prefab paths \
+                     ({patterns}), but this machine does not have `merge.{driver}.driver` in local \
+                     Git config. Use Autofix safe checks to configure the local driver.",
+                    driver = LFS_UNITYYAMLMERGE_DRIVER,
+                    patterns = lfs_unity_text_paths.join(", ")
+                ));
+            }
+        }
+
+        let broad_lfs_unity_asset_paths = lfs_unity_attributes
+            .iter()
+            .filter(|attribute| attribute.is_broad_asset_or_meta())
+            .map(|attribute| attribute.pattern.as_str())
+            .collect::<Vec<_>>();
+        if !broad_lfs_unity_asset_paths.is_empty() {
             let protected_scenes = protected_scene_paths(workdir, &gitattributes)?
                 .into_iter()
                 .filter(|path| !path_is_locally_ignored(path, &locally_ignored_paths))
                 .collect::<Vec<_>>();
-            if !protected_scenes.is_empty() {
-                warnings.push(format!(
-                    "Unity scene or asset paths are managed by Git LFS ({patterns}). GitButler \
-                     workspace operations do not apply worktree filters, so these paths should be \
-                     treated as externally managed. Examples: {examples}.",
-                    patterns = lfs_managed_unity_paths.join(", "),
-                    examples = protected_scenes.join(", ")
-                ));
-            }
+            warnings.push(format!(
+                "Broad Unity asset or meta paths are managed by Git LFS ({patterns}). Many Unity \
+                 `.asset` and `.meta` files are text-serialized merge candidates, so prefer \
+                 path-specific LFS rules for generated or binary assets only.{examples}",
+                patterns = broad_lfs_unity_asset_paths.join(", "),
+                examples = format_examples(&protected_scenes)
+            ));
         }
 
         let unmanaged_lighting_data = unmanaged_lighting_data_assets(workdir, &gitattributes)?
@@ -517,20 +594,43 @@ fn join_headsup_messages<const N: usize>(messages: [Option<String>; N]) -> Optio
     (!messages.is_empty()).then(|| messages.join("\n\n"))
 }
 
-fn ensure_unityyamlmerge_is_configured(
+struct UnityMergeToolSetup {
+    tool_path: PathBuf,
+    mergetool_configured: bool,
+    lfs_text_driver_configured: bool,
+}
+
+fn ensure_unity_merge_tools_are_configured(
     repo: &gix::Repository,
     workdir: &Path,
     explicit_tool_path: Option<&Path>,
-) -> Result<Option<PathBuf>> {
-    if unityyamlmerge_is_fully_configured(repo) {
-        return Ok(None);
-    }
+) -> Result<Option<UnityMergeToolSetup>> {
     let Some(unityyamlmerge_path) = find_unityyamlmerge_path(workdir, explicit_tool_path) else {
         return Ok(None);
     };
 
-    configure_unityyamlmerge(repo, &unityyamlmerge_path)?;
-    Ok(Some(unityyamlmerge_path))
+    let mergetool_configured = if unityyamlmerge_is_fully_configured(repo) {
+        false
+    } else {
+        configure_unityyamlmerge(repo, &unityyamlmerge_path)?
+    };
+    let lfs_text_driver_configured =
+        if lfs_text_merge_driver_is_configured(repo, LFS_UNITYYAMLMERGE_DRIVER) {
+            false
+        } else {
+            configure_lfs_text_merge_driver(
+                repo,
+                LFS_UNITYYAMLMERGE_DRIVER,
+                LFS_UNITYYAMLMERGE_NAME,
+                &unityyamlmerge_program(&unityyamlmerge_path),
+            )?
+        };
+
+    Ok(Some(UnityMergeToolSetup {
+        tool_path: unityyamlmerge_path,
+        mergetool_configured,
+        lfs_text_driver_configured,
+    }))
 }
 
 fn unityyamlmerge_mergetool_is_configured(repo: &gix::Repository) -> bool {
@@ -541,6 +641,11 @@ fn unityyamlmerge_mergetool_is_configured(repo: &gix::Repository) -> bool {
 fn unityyamlmerge_merge_driver_is_configured(repo: &gix::Repository) -> bool {
     let config = repo.config_snapshot();
     config.string("merge.unityyamlmerge.driver").is_some()
+}
+
+fn lfs_text_merge_driver_is_configured(repo: &gix::Repository, driver: &str) -> bool {
+    let config = repo.config_snapshot();
+    config.string(&format!("merge.{driver}.driver")).is_some()
 }
 
 fn unityyamlmerge_is_fully_configured(repo: &gix::Repository) -> bool {
@@ -639,11 +744,13 @@ fn unity_editor_version(workdir: &Path) -> Option<String> {
     })
 }
 
-fn configure_unityyamlmerge(repo: &gix::Repository, unityyamlmerge_path: &Path) -> Result<()> {
-    let path = shell_quoted_path(unityyamlmerge_path);
-    let mergetool_cmd = format!(r#"{path} merge -p "$BASE" "$REMOTE" "$LOCAL" "$MERGED""#);
+fn configure_unityyamlmerge(repo: &gix::Repository, unityyamlmerge_path: &Path) -> Result<bool> {
+    let mergetool_cmd = format!(
+        r#"{} merge -p "$BASE" "$REMOTE" "$LOCAL" "$MERGED""#,
+        shell_quoted_path(unityyamlmerge_path)
+    );
 
-    _ = edit_repo_config(repo, gix::config::Source::Local, |config| {
+    edit_repo_config(repo, gix::config::Source::Local, |config| {
         set_config_value(config, "merge.tool", "unityyamlmerge")?;
         remove_config_value(config, "merge.unityyamlmerge.name")?;
         remove_config_value(config, "merge.unityyamlmerge.driver")?;
@@ -651,8 +758,30 @@ fn configure_unityyamlmerge(repo: &gix::Repository, unityyamlmerge_path: &Path) 
         set_config_value(config, "mergetool.unityyamlmerge.trustExitCode", "false")?;
         set_config_value(config, "mergetool.unityyamlmerge.cmd", &mergetool_cmd)?;
         Ok(())
-    })?;
-    Ok(())
+    })
+}
+
+fn configure_lfs_text_merge_driver(
+    repo: &gix::Repository,
+    driver: &str,
+    name: &str,
+    program: &str,
+) -> Result<bool> {
+    let driver_cmd = format!(
+        "git lfs merge-driver --ancestor %O --current %A --other %B --marker-size %L --output %A --program '{program}'"
+    );
+    edit_repo_config(repo, gix::config::Source::Local, |config| {
+        set_config_value(config, &format!("merge.{driver}.name"), name)?;
+        set_config_value(config, &format!("merge.{driver}.driver"), &driver_cmd)?;
+        Ok(())
+    })
+}
+
+fn unityyamlmerge_program(unityyamlmerge_path: &Path) -> String {
+    format!(
+        r#"{} merge -p "%%O" "%%B" "%%A" "%%D""#,
+        shell_quoted_path(unityyamlmerge_path)
+    )
 }
 
 fn remove_unityyamlmerge_driver(repo: &gix::Repository) -> Result<bool> {
@@ -668,7 +797,27 @@ fn shell_quoted_path(path: &Path) -> String {
     format!("\"{}\"", path.display())
 }
 
-fn lfs_managed_unity_paths(gitattributes: &str) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LfsManagedUnityAttribute {
+    pattern: String,
+    merge: Option<String>,
+}
+
+impl LfsManagedUnityAttribute {
+    fn is_scene_or_prefab(&self) -> bool {
+        [".unity", ".prefab"]
+            .iter()
+            .any(|ext| self.pattern.contains(ext))
+    }
+
+    fn is_broad_asset_or_meta(&self) -> bool {
+        ["*.asset", "*.meta"]
+            .iter()
+            .any(|pattern| self.pattern.contains(pattern))
+    }
+}
+
+fn lfs_managed_unity_attributes(gitattributes: &str) -> Vec<LfsManagedUnityAttribute> {
     let mut matches = Vec::new();
     for line in gitattributes.lines().map(str::trim) {
         if line.is_empty() || line.starts_with('#') || !line.contains("filter=lfs") {
@@ -681,12 +830,66 @@ fn lfs_managed_unity_paths(gitattributes: &str) -> Vec<String> {
             .iter()
             .any(|ext| pattern.contains(ext))
         {
-            matches.push(pattern.to_owned());
+            matches.push(LfsManagedUnityAttribute {
+                pattern: pattern.to_owned(),
+                merge: merge_attribute(line),
+            });
         }
     }
-    matches.sort();
-    matches.dedup();
+    matches.sort_by(|left, right| left.pattern.cmp(&right.pattern));
+    matches.dedup_by(|left, right| left.pattern == right.pattern);
     matches
+}
+
+fn merge_attribute(line: &str) -> Option<String> {
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix("merge=").map(ToOwned::to_owned))
+}
+
+fn format_examples(paths: &[String]) -> String {
+    if paths.is_empty() {
+        String::new()
+    } else {
+        format!(" Examples: {}.", paths.join(", "))
+    }
+}
+
+fn path_is_configured_lfs_unity_text_merge_path(repo: &gix::Repository, path: &str) -> bool {
+    if !lfs_text_merge_driver_is_configured(repo, LFS_UNITYYAMLMERGE_DRIVER)
+        || !path_uses_lfs_unity_text_merge_attribute(repo, path)
+    {
+        return false;
+    }
+
+    true
+}
+
+fn path_uses_lfs_unity_text_merge_attribute(repo: &gix::Repository, path: &str) -> bool {
+    if ![".unity", ".prefab"].iter().any(|ext| path.ends_with(ext)) {
+        return false;
+    }
+    let Some(workdir) = repo.workdir() else {
+        return false;
+    };
+    let Some(gitattributes) = read_optional_text_file(&workdir.join(".gitattributes"))
+        .ok()
+        .flatten()
+    else {
+        return false;
+    };
+
+    lfs_managed_unity_attributes(&gitattributes)
+        .iter()
+        .filter(|attribute| attribute.is_scene_or_prefab())
+        .any(|attribute| attribute.merge.as_deref() == Some(LFS_UNITYYAMLMERGE_DRIVER))
+}
+
+fn autofix_filter_paths(repo: &gix::Repository) -> anyhow::Result<Vec<String>> {
+    let filter_paths = worktree_filter_paths(repo)?;
+    Ok(filter_paths
+        .into_iter()
+        .filter(|path| !path_uses_lfs_unity_text_merge_attribute(repo, path))
+        .collect())
 }
 
 fn protected_scene_paths(workdir: &Path, gitattributes: &str) -> Result<Vec<String>> {
@@ -1128,11 +1331,19 @@ UserSettings/
                 .is_some_and(|value| value.contains("UnityYAMLMerge.exe")),
             "must configure the mergetool command in local git config"
         );
+        assert!(
+            config
+                .string("merge.lfs-unityyamlmerge.driver")
+                .map(|value| value.to_string())
+                .is_some_and(|value| value.contains("git lfs merge-driver")
+                    && value.contains("UnityYAMLMerge.exe")),
+            "must configure the LFS-backed text merge driver for Unity YAML"
+        );
         Ok(())
     }
 
     #[test]
-    fn project_activation_headsup_warns_when_unity_scenes_are_lfs_managed() -> Result<()> {
+    fn project_activation_headsup_warns_when_unity_scenes_use_default_lfs_merge() -> Result<()> {
         let (repo, _tmp) = unity_repo(
             r#"%YAML 1.1
 EditorSettings:
@@ -1155,12 +1366,148 @@ UserSettings/
 
         let headsup = project_activation_headsup(&repo)?.expect("a warning");
         assert!(
-            headsup.contains("Git LFS"),
-            "must mention Git LFS-managed Unity paths: {headsup}"
+            headsup.contains("merge=lfs-unityyamlmerge"),
+            "must explain that Unity LFS scenes need the LFS-backed merge driver: {headsup}"
         );
         assert!(
             headsup.contains("Assets/Scenes/dealers.unity"),
             "must name the concrete Unity scene paths affected by the LFS warning: {headsup}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_activation_headsup_accepts_lfs_unity_scenes_with_local_driver() -> Result<()> {
+        let (mut repo, _tmp) = unity_repo(
+            r#"%YAML 1.1
+EditorSettings:
+  m_SerializationMode: 2
+"#,
+            Some(
+                r#"Library/
+Temp/
+Logs/
+UserSettings/
+"#,
+            ),
+            Some("*.unity filter=lfs diff=lfs merge=lfs-unityyamlmerge -text\n"),
+            &[("Assets/Scenes/dealers.unity", "%YAML 1.1\nScene:\n")],
+        )?;
+        let tool_path = repo
+            .workdir()
+            .expect("test repo has worktree")
+            .join("UnityYAMLMerge.exe");
+        std::fs::write(&tool_path, "stub")?;
+        configure_lfs_text_merge_driver(
+            &repo,
+            LFS_UNITYYAMLMERGE_DRIVER,
+            LFS_UNITYYAMLMERGE_NAME,
+            &unityyamlmerge_program(&tool_path),
+        )?;
+        repo.reload()?;
+
+        assert_eq!(
+            project_activation_headsup(&repo)?,
+            None,
+            "LFS Unity scenes with the configured text merge driver should be Smart Merge candidates"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_activation_headsup_warns_when_lfs_unity_driver_is_missing_locally() -> Result<()> {
+        let (repo, _tmp) = unity_repo(
+            r#"%YAML 1.1
+EditorSettings:
+  m_SerializationMode: 2
+"#,
+            Some(
+                r#"Library/
+Temp/
+Logs/
+UserSettings/
+"#,
+            ),
+            Some("*.unity filter=lfs diff=lfs merge=lfs-unityyamlmerge -text\n"),
+            &[("Assets/Scenes/dealers.unity", "%YAML 1.1\nScene:\n")],
+        )?;
+
+        let headsup = project_activation_headsup(&repo)?.expect("a warning");
+        assert!(
+            headsup.contains("merge.lfs-unityyamlmerge.driver"),
+            "must explain that the local LFS text merge driver is missing: {headsup}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unity_autofix_configures_lfs_unityyamlmerge_driver_when_tool_is_available() -> Result<()> {
+        let (mut repo, _tmp) = unity_repo(
+            r#"%YAML 1.1
+EditorSettings:
+  m_SerializationMode: 2
+"#,
+            Some(
+                r#"Library/
+Temp/
+Logs/
+UserSettings/
+"#,
+            ),
+            Some("*.unity filter=lfs diff=lfs merge=lfs-unityyamlmerge -text\n"),
+            &[("Assets/Scenes/dealers.unity", "%YAML 1.1\nScene:\n")],
+        )?;
+        let tool_path = repo
+            .workdir()
+            .expect("test repo has worktree")
+            .join("UnityYAMLMerge.exe");
+        std::fs::write(&tool_path, "stub")?;
+
+        let setup = ensure_unity_merge_tools_are_configured(
+            &repo,
+            repo.workdir().unwrap(),
+            Some(&tool_path),
+        )?
+        .expect("tool should be configured");
+        assert!(
+            setup.lfs_text_driver_configured,
+            "autofix setup should report configuring the LFS-backed Unity merge driver"
+        );
+
+        repo.reload()?;
+        assert!(
+            repo.config_snapshot()
+                .string("merge.lfs-unityyamlmerge.driver")
+                .map(|value| value.to_string())
+                .is_some_and(|value| value.contains("git lfs merge-driver")
+                    && value.contains("UnityYAMLMerge.exe")),
+            "local Git config must contain the LFS-backed Unity merge driver"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn project_activation_headsup_warns_when_broad_unity_assets_are_lfs_managed() -> Result<()> {
+        let (repo, _tmp) = unity_repo(
+            r#"%YAML 1.1
+EditorSettings:
+  m_SerializationMode: 2
+"#,
+            Some(
+                r#"Library/
+Temp/
+Logs/
+UserSettings/
+"#,
+            ),
+            Some("*.asset filter=lfs diff=lfs merge=lfs -text\n"),
+            &[("Assets/Settings.asset", "%YAML 1.1\nSettings:\n")],
+        )?;
+
+        let headsup = project_activation_headsup(&repo)?.expect("a warning");
+        assert!(
+            headsup.contains("Broad Unity asset or meta paths"),
+            "must keep warning on broad Unity asset LFS rules: {headsup}"
         );
         Ok(())
     }

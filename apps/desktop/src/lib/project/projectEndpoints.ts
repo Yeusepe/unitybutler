@@ -11,6 +11,8 @@ export type ProjectInfo = {
 
 export type UnityAutofixOutcome = {
 	forceTextUpdated: boolean;
+	unityYamlMergeMergetoolConfigured: boolean;
+	lfsUnityYamlMergeDriverConfigured: boolean;
 	unityYamlMergeDriverRemoved: boolean;
 	locallyIgnoredPathsAdded: number;
 	remainingHeadsup?: string;

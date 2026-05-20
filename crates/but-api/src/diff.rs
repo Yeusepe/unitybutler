@@ -167,19 +167,25 @@ pub fn changes_in_worktree_with_perm(
         &ws,
         Some(changes.changes.clone()),
     );
-    let mut trans = db.immediate_transaction()?;
-
-    let (assignments, assignments_error) = {
-        but_hunk_assignment::assignments_with_fallback(
-            trans.hunk_assignments_mut()?,
-            &repo,
-            &ws,
-            Some(changes.changes.clone()),
-            context_lines,
-        )?
+    let (assignments, assignments_error) = match db.immediate_transaction_nonblocking()? {
+        Some(mut trans) => {
+            let (assignments, assignments_error) = but_hunk_assignment::assignments_with_fallback(
+                trans.hunk_assignments_mut()?,
+                &repo,
+                &ws,
+                Some(changes.changes.clone()),
+                context_lines,
+            )?;
+            trans.commit()?;
+            (assignments, assignments_error)
+        }
+        None => {
+            tracing::warn!(
+                "Skipping hunk assignment computation because the database is locked; it will be retried on the next worktree refresh"
+            );
+            (Vec::new(), None)
+        }
     };
-
-    trans.commit()?;
     drop((repo, ws, db));
 
     Ok(WorktreeChanges {

@@ -50,6 +50,7 @@ export type CodeRabbitReviewRequest = {
 	base?: string;
 	files?: string[];
 	workflows?: CodeRabbitWorkflowId[];
+	instructions?: string;
 };
 
 export type CodeRabbitFinding = {

@@ -117,6 +117,7 @@
 <div
 	class="header-wrapper"
 	class:rounded={roundedBottom}
+	class:actions-visible={actionsVisible}
 	use:focusable={{
 		onAction: () => onclick?.(),
 		onActive: (value) => (active = value),
@@ -237,6 +238,10 @@
 		&.rounded {
 			border-bottom: 1px solid var(--border-2);
 			border-radius: var(--radius-ml);
+		}
+
+		&.actions-visible {
+			overflow: visible;
 		}
 	}
 
@@ -377,6 +382,8 @@
 
 	.branch-hedaer__actions-row {
 		display: flex;
+		z-index: 2;
+		position: relative;
 		padding: 10px;
 		gap: 10px;
 		border-top: 1px solid var(--border-2);
@@ -392,7 +399,7 @@
 		display: flex;
 		flex: 1;
 		width: 100%;
-		overflow: hidden;
+		overflow: visible;
 		gap: 6px;
 	}
 

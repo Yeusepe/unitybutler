@@ -41,6 +41,70 @@ describe("WorktreeService", () => {
 		});
 	});
 
+	test("clears the worktree filter before refreshing after unignore", async () => {
+		let localIgnoredResponse = ["Assets/Generated"];
+		const calls: string[] = [];
+		let transformLocalIgnoredPaths: ((paths: string[]) => string[]) | undefined;
+		const worktreeData = {
+			rawChanges: [{ path: "Assets/Generated/NavMesh.asset" }],
+			ignoredChanges: [],
+			hunkAssignments: [],
+			changes: { ids: [], entities: {} },
+		};
+		let transformWorktreeData: ((data: typeof worktreeData) => {
+			rawChanges: { path: string }[];
+		}) | undefined;
+
+		const service = new WorktreeService({
+			endpoints: {
+				setLocalIgnoredPath: {
+					mutate: vi.fn().mockResolvedValue(undefined),
+				},
+				worktreeChanges: {
+					fetch: vi.fn().mockImplementation(async () => {
+						calls.push("worktreeChanges.fetch");
+						expect(transformWorktreeData?.(worktreeData).rawChanges).toEqual([
+							{ path: "Assets/Generated/NavMesh.asset" },
+						]);
+					}),
+					useQuery: vi.fn((_args, options) => {
+						transformWorktreeData = options.transform;
+					}),
+				},
+				localIgnoredPaths: {
+					fetch: vi.fn().mockImplementation(async () => {
+						calls.push("localIgnoredPaths.fetch");
+					}),
+					useQuery: vi.fn((_args, options) => {
+						transformLocalIgnoredPaths = options.transform;
+						return {
+							get response() {
+								return transformLocalIgnoredPaths?.(localIgnoredResponse);
+							},
+						};
+					}),
+				},
+			},
+		} as never);
+
+		const localIgnoredPathsQuery = service.localIgnoredPaths("project-1");
+		service.worktreeData("project-1");
+
+		await service.setLocalIgnoredPath("project-1", "Assets/Generated", true);
+		expect(localIgnoredPathsQuery.response).toEqual(["Assets/Generated"]);
+		expect(transformWorktreeData?.(worktreeData).rawChanges).toEqual([]);
+
+		localIgnoredResponse = [];
+		await service.setLocalIgnoredPath("project-1", "Assets/Generated", false);
+
+		expect(calls).toEqual(["worktreeChanges.fetch", "localIgnoredPaths.fetch"]);
+		expect(localIgnoredPathsQuery.response).toEqual([]);
+		expect(service["backendApi"].endpoints.worktreeChanges.fetch).toHaveBeenCalledWith(
+			{ projectId: "project-1" },
+			{ forceRefetch: true },
+		);
+	});
+
 	test("serializes local ignore mutations per project", async () => {
 		let releaseFirstMutation: (() => void) | undefined;
 		const firstMutation = new Promise<void>((resolve) => {

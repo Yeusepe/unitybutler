@@ -1,10 +1,14 @@
 <script lang="ts">
 	import CodeRabbitBrand from "$components/coderabbit/CodeRabbitBrand.svelte";
+	import Dropzone from "$components/shared/Dropzone.svelte";
 	import { showError } from "$lib/error/showError";
 	import { CODERABBIT_SERVICE } from "$lib/coderabbit/coderabbit";
+	import { FileChangeDropData, FolderChangeDropData } from "$lib/dragging/draggables";
 	import { inject } from "@gitbutler/core/context";
 	import { Button, chipToasts } from "@gitbutler/ui";
+	import { portal } from "@gitbutler/ui/utils/portal";
 	import { onDestroy } from "svelte";
+	import type { DropzoneHandler } from "$lib/dragging/handler";
 	import type { CodeRabbitWorkflowId } from "$lib/coderabbit/coderabbit";
 
 	type Props = {
@@ -40,8 +44,16 @@
 	let reviewing = $state(false);
 	let cancelling = $state(false);
 	let statusPopoverOpen = $state(false);
+	let workflowAnchor = $state<HTMLDivElement>();
+	let workflowMenuPosition = $state({ top: 0, left: 0 });
+	let dropPromptOpen = $state(false);
+	let dropPromptPosition = $state({ top: 0, left: 0 });
+	let dropReviewFiles = $state<string[]>([]);
+	let dropReviewInstructions = $state("");
+	let dropzoneHovered = $state(false);
 	let now = $state(Date.now());
 	let interval: ReturnType<typeof setInterval> | undefined;
+	const codeRabbitDropHandler = $derived(new CodeRabbitDropHandler(openDroppedReviewPrompt));
 
 	const isReviewing = $derived(reviewing || !!activeReviewId || !!status?.activeReviewId);
 	const activeProgress = $derived(status?.activeProgress);
@@ -106,8 +118,13 @@
 		if (interval) clearInterval(interval);
 	});
 
-	async function runReview(workflows: CodeRabbitWorkflowId[] = ["default"]) {
+	async function runReview(
+		workflows: CodeRabbitWorkflowId[] = ["default"],
+		override?: { files?: string[]; instructions?: string },
+	) {
 		activeWorkflow = workflows[0] ?? "default";
+		workflowMenuOpen = false;
+		dropPromptOpen = false;
 		if (!status?.cliAvailable) {
 			showError("CodeRabbit CLI unavailable", status?.error ?? "Install the CodeRabbit CLI first.");
 			return;
@@ -127,8 +144,9 @@
 					reviewId,
 					reviewType,
 					base,
-					files,
+					files: override?.files ?? files,
 					workflows,
+					instructions: override?.instructions,
 				},
 			});
 			if (result.findings.length === 0) {
@@ -149,6 +167,35 @@
 		}
 	}
 
+	async function openDroppedReviewPrompt(data: FileChangeDropData | FolderChangeDropData) {
+		const changes = await data.treeChanges();
+		dropReviewFiles = Array.from(new Set(changes.map((change) => change.path)));
+		dropReviewInstructions = "";
+		updateDropPromptPosition();
+		dropPromptOpen = true;
+	}
+
+	function updateDropPromptPosition() {
+		const rect = workflowAnchor?.parentElement?.getBoundingClientRect();
+		if (!rect) return;
+		dropPromptPosition = {
+			top: rect.bottom + 8,
+			left: Math.max(8, Math.min(rect.left, window.innerWidth - 340)),
+		};
+	}
+
+	function droppedScopeLabel() {
+		if (dropReviewFiles.length === 1) return dropReviewFiles[0];
+		return `${dropReviewFiles.length} files`;
+	}
+
+	async function runDroppedReview() {
+		await runReview(["default"], {
+			files: dropReviewFiles,
+			instructions: dropReviewInstructions.trim() || undefined,
+		});
+	}
+
 	async function cancelReview() {
 		const reviewId = activeReviewId ?? status?.activeReviewId;
 		if (!reviewId) return;
@@ -158,6 +205,22 @@
 		} catch (error) {
 			showError("Failed to cancel CodeRabbit review", error);
 		}
+	}
+
+	function toggleWorkflowMenu() {
+		if (!workflowMenuOpen) {
+			updateWorkflowMenuPosition();
+		}
+		workflowMenuOpen = !workflowMenuOpen;
+	}
+
+	function updateWorkflowMenuPosition() {
+		const rect = workflowAnchor?.getBoundingClientRect();
+		if (!rect) return;
+		workflowMenuPosition = {
+			top: rect.bottom + 6,
+			left: Math.max(8, rect.right - 190),
+		};
 	}
 
 	function newReviewId() {
@@ -207,81 +270,157 @@
 			showError("Failed to create CodeRabbit config", error);
 		}
 	}
+
+	class CodeRabbitDropHandler implements DropzoneHandler {
+		constructor(private onReviewScope: (data: FileChangeDropData | FolderChangeDropData) => void) {}
+
+		accepts(data: unknown): boolean {
+			return data instanceof FileChangeDropData || data instanceof FolderChangeDropData;
+		}
+
+		ondrop(data: unknown): void {
+			if (data instanceof FileChangeDropData || data instanceof FolderChangeDropData) {
+				this.onReviewScope(data);
+			}
+		}
+	}
 </script>
 
-<div class="coderabbit-review">
-	<div
-		role="presentation"
-		class="review-button-wrap"
-		onmouseenter={() => (statusPopoverOpen = true)}
-		onmouseleave={() => (statusPopoverOpen = false)}
-	>
-		<Button
-			type="button"
-			kind="outline"
-			size="tag"
-			icon={isReviewing ? "spinner" : undefined}
-			disabled={isReviewing || statusQuery.result.isLoading}
-			tooltip={buttonTooltip}
-			onclick={() => runReview(["default"])}
-		>
-			<span class="button-content">
-				<CodeRabbitBrand />
-				<span>{buttonLabel}</span>
-			</span>
-		</Button>
+<Dropzone
+	handlers={[codeRabbitDropHandler]}
+	onHovered={(hovered) => (dropzoneHovered = hovered)}
+>
+	{#snippet children()}
+		<div class="coderabbit-review dropzone-target" class:dropzone-hovered={dropzoneHovered}>
+			<div
+				role="presentation"
+				class="review-button-wrap"
+				onmouseenter={() => (statusPopoverOpen = true)}
+				onmouseleave={() => (statusPopoverOpen = false)}
+			>
+				<Button
+					type="button"
+					kind="outline"
+					size="tag"
+					icon={isReviewing ? "spinner" : undefined}
+					disabled={isReviewing || statusQuery.result.isLoading}
+					tooltip={buttonTooltip}
+					onclick={() => runReview(["default"])}
+				>
+					<span class="button-content">
+						<CodeRabbitBrand />
+						<span>{buttonLabel}</span>
+					</span>
+				</Button>
 
-		{#if statusPopoverOpen && (isReviewing || lastReview || status?.error)}
-			<div class="status-popover">
-				<div class="status-popover__header">
-					<CodeRabbitBrand />
-					<div class="status-popover__title">
-						<strong>{popoverTitle}</strong>
-						<span>{popoverDetail}</span>
-					</div>
-				</div>
-
-				<div class="status-meta">
-					<span>Elapsed {elapsedLabel}</span>
-					{#if isReviewing && lastUpdateLabel}
-						<span>Last update {lastUpdateLabel} ago</span>
-					{/if}
-				</div>
-
-				{#if activeProgress?.steps?.length}
-					<div class="steps">
-						{#each activeProgress.steps as step}
-							<div class="step" data-status={step.status}>
-								<span class="step-dot"></span>
-								<div class="step-text">
-									<div>
-										<strong>{step.label}</strong>
-										<span>{stepStatusLabel(step.status)}</span>
-									</div>
-									{#if step.detail}
-										<p>{step.detail}</p>
-									{/if}
-								</div>
+				{#if statusPopoverOpen && (isReviewing || lastReview || status?.error)}
+					<div class="status-popover">
+						<div class="status-popover__header">
+							<CodeRabbitBrand />
+							<div class="status-popover__title">
+								<strong>{popoverTitle}</strong>
+								<span>{popoverDetail}</span>
 							</div>
-						{/each}
+						</div>
+
+						<div class="status-meta">
+							<span>Elapsed {elapsedLabel}</span>
+							{#if isReviewing && lastUpdateLabel}
+								<span>Last update {lastUpdateLabel} ago</span>
+							{/if}
+						</div>
+
+						{#if activeProgress?.steps?.length}
+							<div class="steps">
+								{#each activeProgress.steps as step}
+									<div class="step" data-status={step.status}>
+										<span class="step-dot"></span>
+										<div class="step-text">
+											<div>
+												<strong>{step.label}</strong>
+												<span>{stepStatusLabel(step.status)}</span>
+											</div>
+											{#if step.detail}
+												<p>{step.detail}</p>
+											{/if}
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>
-		{/if}
+	<div class="workflow-anchor" bind:this={workflowAnchor}>
+		<Button
+			type="button"
+			kind="ghost"
+			size="tag"
+			icon={isReviewing ? "cross" : "chevron-down"}
+			tooltip={isReviewing ? "Cancel CodeRabbit review" : "CodeRabbit review workflows"}
+			onclick={(event) => {
+				event.stopPropagation();
+				isReviewing ? cancelReview() : toggleWorkflowMenu();
+			}}
+		/>
 	</div>
-	<Button
-		type="button"
-		kind="ghost"
-		size="tag"
-		icon={isReviewing ? "cross" : "chevron-down"}
-		tooltip={isReviewing ? "Cancel CodeRabbit review" : "CodeRabbit review workflows"}
-		onclick={() => (isReviewing ? cancelReview() : (workflowMenuOpen = !workflowMenuOpen))}
-	/>
+		</div>
+	{/snippet}
+</Dropzone>
 
-	{#if workflowMenuOpen}
-		<div class="workflow-menu">
+{#if dropPromptOpen}
+	<div
+		role="presentation"
+		class="drop-prompt-overlay"
+		onclick={() => (dropPromptOpen = false)}
+		use:portal={"body"}
+	>
+		<div
+			class="drop-prompt"
+			style:top={`${dropPromptPosition.top}px`}
+			style:left={`${dropPromptPosition.left}px`}
+			onclick={(event) => event.stopPropagation()}
+			onkeydown={(event) => event.stopPropagation()}
+		>
+			<div class="drop-prompt__header">
+				<CodeRabbitBrand />
+				<div>
+					<strong>Anything to ask?</strong>
+					<span>Reviewing {droppedScopeLabel()}</span>
+				</div>
+			</div>
+			<textarea
+				bind:value={dropReviewInstructions}
+				placeholder="Optional instructions for CodeRabbit"
+				rows="4"
+			></textarea>
+			<div class="drop-prompt__actions">
+				<Button kind="ghost" size="tag" onclick={() => (dropPromptOpen = false)}>Cancel</Button>
+				<Button kind="primary" size="tag" onclick={runDroppedReview}>Review dropped scope</Button>
+			</div>
+		</div>
+	</div>
+{/if}
+
+{#if workflowMenuOpen}
+	<div
+		role="presentation"
+		class="workflow-menu-overlay"
+		onclick={() => (workflowMenuOpen = false)}
+		use:portal={"body"}
+	>
+		<div
+			class="workflow-menu"
+			role="menu"
+			tabindex="-1"
+			style:top={`${workflowMenuPosition.top}px`}
+			style:left={`${workflowMenuPosition.left}px`}
+			onclick={(event) => event.stopPropagation()}
+			onkeydown={(event) => event.stopPropagation()}
+		>
 			<button
 				type="button"
+				role="menuitem"
 				class:active={activeWorkflow === "default"}
 				onclick={() => runReview(["default"])}
 			>
@@ -289,6 +428,7 @@
 			</button>
 			<button
 				type="button"
+				role="menuitem"
 				class:active={activeWorkflow === "performance"}
 				onclick={() => runReview(["performance"])}
 			>
@@ -296,6 +436,7 @@
 			</button>
 			<button
 				type="button"
+				role="menuitem"
 				class:active={activeWorkflow === "security"}
 				onclick={() => runReview(["security"])}
 			>
@@ -303,17 +444,19 @@
 			</button>
 			<button
 				type="button"
+				role="menuitem"
 				class:active={activeWorkflow === "correctness"}
 				onclick={() => runReview(["correctness"])}
 			>
 				Correctness review
 			</button>
 			{#if status?.cliAvailable && !status.configExists}
-				<button type="button" onclick={createConfig}>Create .coderabbit.yaml</button>
+				<button type="button" role="menuitem" onclick={createConfig}>Create .coderabbit.yaml</button
+				>
 			{/if}
 		</div>
-	{/if}
-</div>
+	</div>
+{/if}
 
 <style lang="postcss">
 	.coderabbit-review {
@@ -324,6 +467,10 @@
 	}
 
 	.review-button-wrap {
+		position: relative;
+	}
+
+	.workflow-anchor {
 		position: relative;
 	}
 
@@ -456,10 +603,8 @@
 
 	.workflow-menu {
 		display: flex;
-		z-index: var(--z-popover);
-		position: absolute;
-		top: calc(100% + 6px);
-		right: 0;
+		z-index: var(--z-floating);
+		position: fixed;
 		flex-direction: column;
 		width: 190px;
 		padding: 4px;
@@ -480,6 +625,12 @@
 				background-color: var(--bg-2);
 			}
 		}
+	}
+
+	.workflow-menu-overlay {
+		z-index: var(--z-blocker);
+		position: fixed;
+		inset: 0;
 	}
 
 	.button-content {

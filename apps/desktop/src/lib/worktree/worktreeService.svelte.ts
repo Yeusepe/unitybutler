@@ -116,9 +116,17 @@ export class WorktreeService {
 
 	private async setLocalIgnoredPathNow(projectId: string, path: string, ignored: boolean) {
 		const previousOverrides = this.localIgnoreOverrides;
-		this.setLocalIgnoreOverride(projectId, path, ignored);
+		if (ignored) {
+			this.setLocalIgnoreOverride(projectId, path, ignored);
+		}
 		try {
 			await this.backendApi.endpoints.setLocalIgnoredPath.mutate({ projectId, path, ignored });
+			if (!ignored) {
+				this.clearLocalIgnoredOverride(projectId, path);
+				await this.refreshWorktreeChanges(projectId);
+				this.setLocalIgnoreOverride(projectId, path, ignored);
+				await this.refreshLocalIgnoredPaths(projectId);
+			}
 		} catch (error) {
 			this.localIgnoreOverrides = previousOverrides;
 			throw error;
@@ -135,6 +143,28 @@ export class WorktreeService {
 
 	private overrideForProject(projectId: string): LocalIgnoreOverride {
 		return this.localIgnoreOverrides[projectId] ?? { ignored: [], unignored: [] };
+	}
+
+	private async refreshWorktreeChanges(projectId: string) {
+		await this.backendApi.endpoints.worktreeChanges.fetch({ projectId }, { forceRefetch: true });
+	}
+
+	private async refreshLocalIgnoredPaths(projectId: string) {
+		await this.backendApi.endpoints.localIgnoredPaths.fetch({ projectId }, { forceRefetch: true });
+	}
+
+	private clearLocalIgnoredOverride(projectId: string, path: string) {
+		const normalizedPath = normalizeLocalIgnorePath(path);
+		if (!normalizedPath) return;
+
+		const current = this.overrideForProject(projectId);
+		this.localIgnoreOverrides = {
+			...this.localIgnoreOverrides,
+			[projectId]: {
+				ignored: removePath(current.ignored, normalizedPath),
+				unignored: current.unignored,
+			},
+		};
 	}
 
 	private setLocalIgnoreOverride(projectId: string, path: string, ignored: boolean) {

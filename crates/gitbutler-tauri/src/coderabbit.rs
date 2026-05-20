@@ -115,6 +115,7 @@ pub struct CodeRabbitReviewRequest {
     files: Vec<String>,
     #[serde(default)]
     workflows: Vec<CodeRabbitWorkflowId>,
+    instructions: Option<String>,
 }
 
 fn default_review_type() -> String {
@@ -653,7 +654,10 @@ fn run_review(
         CodeRabbitReviewStepStatus::Running,
         None,
     );
-    let instruction_files = write_workflow_instruction_files(workdir, &request.workflows)?;
+    let mut instruction_files = write_workflow_instruction_files(workdir, &request.workflows)?;
+    if let Some(path) = write_custom_instruction_file(workdir, request.instructions.as_deref())? {
+        instruction_files.push(path);
+    }
     for path in &instruction_files {
         args.push("-c".to_string());
         args.push(path.to_string_lossy().to_string());
@@ -978,6 +982,24 @@ fn write_workflow_instruction_files(
         paths.push(path);
     }
     Ok(paths)
+}
+
+fn write_custom_instruction_file(
+    workdir: &Path,
+    instructions: Option<&str>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let Some(instructions) = instructions.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let path = std::env::temp_dir().join(format!("gitbutler-coderabbit-custom-{}.md", new_review_id()));
+    std::fs::write(
+        &path,
+        format!(
+            "Additional user instructions for this CodeRabbit review:\n\n{instructions}\n\nRepository root: {}",
+            workdir.display()
+        ),
+    )?;
+    Ok(Some(path))
 }
 
 fn workflow_name(workflow: &CodeRabbitWorkflowId) -> &'static str {

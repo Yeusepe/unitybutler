@@ -203,7 +203,11 @@ fn insert_local_ignored_path(paths: &mut BTreeSet<String>, path: String) -> bool
 fn remove_local_ignored_path(paths: &mut BTreeSet<String>, path: &str) -> bool {
     let child_prefix = format!("{path}/");
     let previous_len = paths.len();
-    paths.retain(|existing| existing != path && !existing.starts_with(&child_prefix));
+    paths.retain(|existing| {
+        existing != path
+            && !existing.starts_with(&child_prefix)
+            && !path_starts_with_parent(path, existing)
+    });
     paths.len() != previous_len
 }
 
@@ -223,6 +227,10 @@ fn normalized_path_is_locally_ignored<'a>(
     ignored_paths.into_iter().any(|ignored_path| {
         normalized_path == ignored_path || normalized_path.starts_with(&format!("{ignored_path}/"))
     })
+}
+
+fn path_starts_with_parent(path: &str, parent: &str) -> bool {
+    !parent.is_empty() && path.starts_with(&format!("{parent}/"))
 }
 
 #[cfg(test)]
@@ -336,6 +344,16 @@ mod tests {
         assert!(
             stale_paths.is_empty(),
             "unignoring a folder should also clean up any stale ignored children"
+        );
+
+        let mut parent_paths = BTreeSet::from(["Assets".to_owned()]);
+        assert!(remove_local_ignored_path(
+            &mut parent_paths,
+            "Assets/Generated"
+        ));
+        assert!(
+            parent_paths.is_empty(),
+            "unignoring a child folder should remove a covering parent ignore because local ignores do not support child exceptions"
         );
         Ok(())
     }

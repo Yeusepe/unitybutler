@@ -5,7 +5,6 @@
 	import LineLocksWarning from "$components/diff/LineLocksWarning.svelte";
 	import UnitySemanticDiffView from "$components/diff/UnitySemanticDiffView.svelte";
 	import ReduxResult from "$components/shared/ReduxResult.svelte";
-	import YucpBrandWordmark from "$components/shared/YucpBrandWordmark.svelte";
 	import binarySvg from "$lib/assets/empty-state/binary.svg?raw";
 	import emptyFileSvg from "$lib/assets/empty-state/empty-file.svg?raw";
 	import tooLargeSvg from "$lib/assets/empty-state/too-large.svg?raw";
@@ -262,7 +261,7 @@
 						class:active={unityViewMode === "unity"}
 						onclick={() => (unityViewMode = "unity")}
 					>
-						<YucpBrandWordmark decorative height="0.75rem" />
+						Unity
 					</button>
 					<button
 						type="button"

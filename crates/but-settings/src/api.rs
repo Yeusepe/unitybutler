@@ -61,6 +61,7 @@ pub struct FetchUpdate {
 /// Update request for [`crate::app_settings::UiSettings`].
 pub struct UiUpdate {
     pub use_native_title_bar: Option<bool>,
+    pub no_shadow: Option<bool>,
     // Note that the CLI related information cannot be set - it's set at compile time.
 }
 
@@ -201,6 +202,9 @@ impl AppSettingsWithDiskSync {
         let mut settings = self.get_mut_enforce_save()?;
         if let Some(use_native_title_bar) = update.use_native_title_bar {
             settings.ui.use_native_title_bar = use_native_title_bar;
+        }
+        if let Some(no_shadow) = update.no_shadow {
+            settings.ui.no_shadow = no_shadow;
         }
         settings.save()
     }

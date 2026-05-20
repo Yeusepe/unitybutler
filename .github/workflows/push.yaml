@@ -238,7 +238,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: EmbarkStudios/cargo-deny-action@91bf2b620e09e18d6eb78b92e7861937469acedb # v2.0.17
+      - uses: EmbarkStudios/cargo-deny-action@6c8f9facfa5047ec02d8485b6bf52b587b7777d1 # v2.0.18
         with:
           command: check bans licenses sources
 
@@ -285,7 +285,17 @@ jobs:
       - name: Dependencies for 'keyring'
         run: sudo ./scripts/install-minimal-debian-dependencies.sh
       - name: Install cargo-nextest
-        run: curl -LsSf https://get.nexte.st/0.9.133/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+        run: |
+
+          # To update the version of cargo-nextest, replace the version specifier in the `curl` command and update the
+          # checksum.
+          #
+          # Checksums are available as artifacts on GitHub Release (https://github.com/nextest-rs/nextest/releases),
+          # should be called "cargo-nextest-<VERSION>-x86_64-unknown-linux-gnu.sha256"
+          curl -LsSf https://get.nexte.st/0.9.133/linux -o cargo-nextest.tar.gz
+          echo "a9f992321e8759818400d93abb9477b4b11422d18d216e8d208505bd73454103 cargo-nextest.tar.gz" | sha256sum -c -
+          tar -xzf cargo-nextest.tar.gz -C ${CARGO_HOME:-~/.cargo}/bin
+          rm cargo-nextest.tar.gz
       - name: Run workspace tests
         run: cargo nextest run --workspace --exclude gitbutler-tauri --exclude but-api-macros-tests --profile ci
       - name: Run doctests

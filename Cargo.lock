@@ -874,6 +874,7 @@ dependencies = [
  "but-cherry-apply",
  "but-core",
  "but-ctx",
+ "but-db",
  "but-forge",
  "but-forge-storage",
  "but-gerrit",
@@ -891,6 +892,7 @@ dependencies = [
  "but-server",
  "but-settings",
  "but-testsupport",
+ "but-transaction",
  "but-update",
  "but-workspace",
  "but-worktrees",
@@ -1721,6 +1723,23 @@ dependencies = [
  "gix",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "but-transaction"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bstr",
+ "but-api",
+ "but-core",
+ "but-ctx",
+ "but-oplog",
+ "but-rebase",
+ "but-testsupport",
+ "but-workspace",
+ "gix",
+ "snapbox",
 ]
 
 [[package]]

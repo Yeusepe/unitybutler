@@ -27,7 +27,8 @@
 		"bundle": "pnpm build && electron-builder",
 		"bundle-local": "CHANNEL=${CHANNEL:-} pnpm -F @gitbutler/but-sdk build && CHANNEL=${CHANNEL:-} pnpm bundle -c.mac.entitlements=resources/entitlements.mac.local.plist -c.mac.entitlementsInherit=resources/entitlements.mac.local.plist",
 		"bundle-local-nightly": "CHANNEL=nightly pnpm -F @gitbutler/but-sdk build:release && CHANNEL=nightly pnpm bundle -c.mac.entitlements=resources/entitlements.mac.local.plist -c.mac.entitlementsInherit=resources/entitlements.mac.local.plist",
-		"demos": "storybook dev --no-open -p 6007"
+		"demos": "storybook dev --no-open -p 6007",
+		"optimize-icons": "node scripts/optimize-icons.mjs"
 	},
 	"build": {
 		"appId": "com.gitbutler.lite",
@@ -125,6 +126,7 @@
 		"@gitbutler/design-core": "3.2.1",
 		"@pierre/diffs": "^1.1.3",
 		"@reduxjs/toolkit": "catalog:redux",
+		"@suspensive/react-query": "npm:@suspensive/react-query-5@^3.21.2",
 		"@tanstack/react-hotkeys": "^0.10.0",
 		"@tanstack/react-query": "^5.90.21",
 		"@tanstack/react-query-devtools": "^5.91.3",

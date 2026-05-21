@@ -403,19 +403,32 @@ fn posthog_client(app_settings: AppSettings) -> Option<impl Future<Output = post
     }
 }
 
-impl<T> ResultMetricsExt for anyhow::Result<T> {
-    fn emit_metrics(self, ctx: Option<OneshotMetricsContext>) -> anyhow::Result<()> {
+impl<T, E> ResultMetricsExt<T, E> for Result<T, E>
+where
+    E: std::fmt::Display + From<std::io::Error>,
+{
+    fn emit_metrics(self, ctx: Option<OneshotMetricsContext>) -> Result<T, E> {
         let Some(OneshotMetricsContext { start, command }) = ctx else {
-            return self.map(|_| ());
+            return self;
         };
 
         let props = Props::from_result(start, &self);
         let Some(v) = command.to_possible_value() else {
             tracing::warn!("BUG: didn't get string value for {command:?}");
-            return self.map(|_| ());
+            return self;
         };
 
-        tokio::process::Command::new(binary_path::current_exe_for_but_exec()?)
+        // We can fail both in resolving the path to the but binary, and in invoking it. As metrics
+        // emissions shouldn't impact user experience, we swallow these errors.
+        let but_path = match binary_path::current_exe_for_but_exec() {
+            Err(err) => {
+                tracing::warn!(?err, "Failed to resolve binary path to `but`");
+                return self;
+            }
+            Ok(path) => path,
+        };
+
+        let _ = tokio::process::Command::new(but_path)
             .arg("metrics")
             .arg("--command-name")
             .arg(v.get_name())
@@ -425,7 +438,9 @@ impl<T> ResultMetricsExt for anyhow::Result<T> {
             .stdout(std::process::Stdio::null())
             .group()
             .kill_on_drop(false)
-            .spawn()?;
-        self.map(|_| ())
+            .spawn()
+            .map_err(|err| tracing::warn!(?err, "Failed to emit metrics"));
+
+        self
     }
 }

@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
-    io::Write,
+    fs::{self, File},
+    io::{self, BufRead, BufReader, Read, Write},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result, bail};
@@ -18,6 +21,7 @@ use gitbutler_stack::VirtualBranchesHandle;
 use gitbutler_workspace::branch_trees::{WorkspaceState, update_uncommitted_changes};
 use gix::merge::tree::TreatAsUnresolved;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::BranchManagerExt;
 
@@ -91,10 +95,128 @@ but_schemars::register_sdk_type!(StackStatuses);
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeConflictPreview {
     pub path: String,
-    pub base: Option<String>,
-    pub local: Option<String>,
-    pub upstream: Option<String>,
+    pub mode: WorktreeConflictPreviewMode,
+    pub session_id: String,
+    pub lfs: UnityConflictLfsInfo,
+    pub document: Option<UnityConflictPreviewDocument>,
+    pub available_choices: Vec<UnityConflictSide>,
+    pub message: Option<String>,
 }
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(WorktreeConflictPreview);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Copy)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum WorktreeConflictPreviewMode {
+    MergePreview,
+    ChooseSide,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(WorktreeConflictPreviewMode);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Copy, Eq, Hash)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum UnityConflictSide {
+    Local,
+    Upstream,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictSide);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnityConflictLfsInfo {
+    pub tracked: bool,
+    pub base: UnityConflictSideState,
+    pub local: UnityConflictSideState,
+    pub upstream: UnityConflictSideState,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictLfsInfo);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnityConflictSideState {
+    pub state: UnityConflictMaterializeState,
+    pub size: Option<u64>,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictSideState);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone, Copy)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub enum UnityConflictMaterializeState {
+    TextReady,
+    MissingLfsObject,
+    BinaryOrNonUtf8,
+    PointerStillPresent,
+    Absent,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictMaterializeState);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnityConflictPreviewDocument {
+    pub path: String,
+    pub blocks: Vec<UnityConflictPreviewBlock>,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictPreviewDocument);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnityConflictPreviewBlock {
+    pub id: String,
+    pub label: String,
+    pub context: String,
+    pub ours: String,
+    pub theirs: String,
+    pub fields: Vec<UnityConflictPreviewField>,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictPreviewBlock);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnityConflictPreviewField {
+    pub id: String,
+    pub label: String,
+    pub ours: String,
+    pub theirs: String,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictPreviewField);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct UnityConflictResolutionInput {
+    pub session_id: String,
+    pub path: String,
+    pub resolution: UnityConflictResolution,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictResolutionInput);
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+#[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum UnityConflictResolution {
+    Blocks { blocks: HashMap<String, String> },
+    Local,
+    Upstream,
+}
+#[cfg(feature = "export-schema")]
+but_schemars::register_sdk_type!(UnityConflictResolution);
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 #[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]
@@ -830,91 +952,305 @@ pub fn worktree_conflict_preview(
         return Ok(None);
     };
 
-    let [base, local, upstream] = conflict.entries();
-    let base = if let Some(entry) = base {
-        let object = repo.find_object(entry.id)?;
-        Some(materialize_preview_content(
-            &repo,
-            &normalized_path,
-            PreviewSide::Base,
-            &String::from_utf8_lossy(&object.into_blob().data),
-        )?)
-    } else {
-        None
+    let session = UnityConflictSession::create(context.ctx.project_data_dir(), &normalized_path)?;
+    let [base_entry, local_entry, upstream_entry] = conflict.entries();
+    let base = materialize_preview_side(
+        &repo,
+        &session,
+        &normalized_path,
+        PreviewSide::Base,
+        base_entry.map(|entry| entry.id),
+    )?;
+    let local = materialize_preview_side(
+        &repo,
+        &session,
+        &normalized_path,
+        PreviewSide::Local,
+        local_entry.map(|entry| entry.id),
+    )?;
+    let upstream = materialize_preview_side(
+        &repo,
+        &session,
+        &normalized_path,
+        PreviewSide::Upstream,
+        upstream_entry.map(|entry| entry.id),
+    )?;
+
+    let lfs = UnityConflictLfsInfo {
+        tracked: base.lfs_tracked || local.lfs_tracked || upstream.lfs_tracked,
+        base: base.side_state(),
+        local: local.side_state(),
+        upstream: upstream.side_state(),
     };
-    let local = if let Some(entry) = local {
-        let object = repo.find_object(entry.id)?;
-        Some(materialize_preview_content(
-            &repo,
-            &normalized_path,
-            PreviewSide::Local,
-            &String::from_utf8_lossy(&object.into_blob().data),
-        )?)
-    } else {
-        None
+    let available_choices = [
+        (&local, UnityConflictSide::Local),
+        (&upstream, UnityConflictSide::Upstream),
+    ]
+    .into_iter()
+    .filter_map(|(side, choice)| side.text_ready().then_some(choice))
+    .collect::<Vec<_>>();
+
+    let mut session_meta = UnityConflictSessionMeta {
+        path: normalized_path.clone(),
+        base: base.file.clone(),
+        local: local.file.clone(),
+        upstream: upstream.file.clone(),
+        merged: None,
     };
-    let upstream = if let Some(entry) = upstream {
-        let object = repo.find_object(entry.id)?;
-        Some(materialize_preview_content(
-            &repo,
-            &normalized_path,
-            PreviewSide::Upstream,
-            &String::from_utf8_lossy(&object.into_blob().data),
-        )?)
-    } else {
-        None
-    };
+
+    if let (Some(base_file), Some(local_file), Some(upstream_file)) =
+        (&base.file, &local.file, &upstream.file)
+        && base.text_ready()
+        && local.text_ready()
+        && upstream.text_ready()
+    {
+        let merged = session.file_path("merged");
+        match merge_preview_files(base_file, local_file, upstream_file, &merged)
+            .and_then(|()| parse_unity_conflict_blocks(&merged))
+        {
+            Ok(blocks) if !blocks.is_empty() => {
+                session_meta.merged = Some(merged);
+                session.write_meta(&session_meta)?;
+                return Ok(Some(WorktreeConflictPreview {
+                    path: path.to_owned(),
+                    mode: WorktreeConflictPreviewMode::MergePreview,
+                    session_id: session.id,
+                    lfs,
+                    document: Some(UnityConflictPreviewDocument {
+                        path: path.to_owned(),
+                        blocks,
+                    }),
+                    available_choices,
+                    message: None,
+                }));
+            }
+            Ok(_) => {
+                session_meta.merged = Some(merged);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    path = normalized_path,
+                    "failed to build Unity merge preview"
+                );
+            }
+        }
+    }
+
+    session.write_meta(&session_meta)?;
     Ok(Some(WorktreeConflictPreview {
         path: path.to_owned(),
-        base,
-        local,
-        upstream,
+        mode: WorktreeConflictPreviewMode::ChooseSide,
+        session_id: session.id,
+        lfs,
+        document: None,
+        available_choices,
+        message: Some(
+            "GitButler could not build a pointer-safe scene merge preview. Choose the local or upstream file explicitly."
+                .to_owned(),
+        ),
     }))
 }
 
+#[derive(Clone, Copy)]
 enum PreviewSide {
     Base,
     Local,
     Upstream,
 }
 
-fn materialize_preview_content(
-    repo: &gix::Repository,
-    path: &str,
-    side: PreviewSide,
-    content: &str,
-) -> Result<String> {
-    if !is_git_lfs_pointer(content) {
-        return Ok(content.to_owned());
+struct MaterializedPreviewSide {
+    file: Option<PathBuf>,
+    state: UnityConflictMaterializeState,
+    size: Option<u64>,
+    lfs_tracked: bool,
+}
+
+impl MaterializedPreviewSide {
+    fn text_ready(&self) -> bool {
+        self.state == UnityConflictMaterializeState::TextReady
     }
 
-    if matches!(side, PreviewSide::Local) {
-        if let Some(workdir) = repo.workdir() {
-            let worktree_content =
-                std::fs::read_to_string(workdir.join(path)).with_context(|| {
-                    format!(
-                        "Failed to read local Unity file {}",
-                        workdir.join(path).display()
-                    )
-                })?;
-            if !is_git_lfs_pointer(&worktree_content) {
-                return Ok(worktree_content);
+    fn side_state(&self) -> UnityConflictSideState {
+        UnityConflictSideState {
+            state: self.state,
+            size: self.size,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct UnityConflictSessionMeta {
+    path: String,
+    base: Option<PathBuf>,
+    local: Option<PathBuf>,
+    upstream: Option<PathBuf>,
+    merged: Option<PathBuf>,
+}
+
+struct UnityConflictSession {
+    id: String,
+    dir: PathBuf,
+}
+
+impl UnityConflictSession {
+    fn create(project_data_dir: PathBuf, path: &str) -> Result<Self> {
+        let id = Uuid::new_v4().to_string();
+        let dir = project_data_dir.join("unity-conflict-sessions").join(&id);
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create Unity conflict session for {path}"))?;
+        Ok(Self { id, dir })
+    }
+
+    fn open(project_data_dir: PathBuf, id: &str) -> Result<Self> {
+        validate_session_id(id)?;
+        let dir = project_data_dir.join("unity-conflict-sessions").join(id);
+        if !dir.is_dir() {
+            bail!("Unity conflict session is no longer available");
+        }
+        Ok(Self {
+            id: id.to_owned(),
+            dir,
+        })
+    }
+
+    fn file_path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    fn write_meta(&self, meta: &UnityConflictSessionMeta) -> Result<()> {
+        fs::write(
+            self.dir.join("session.json"),
+            serde_json::to_vec_pretty(meta)?,
+        )
+        .context("failed to write Unity conflict session metadata")
+    }
+
+    fn read_meta(&self) -> Result<UnityConflictSessionMeta> {
+        Ok(serde_json::from_slice(&fs::read(
+            self.dir.join("session.json"),
+        )?)?)
+    }
+}
+
+fn validate_session_id(id: &str) -> Result<()> {
+    if id
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    {
+        Ok(())
+    } else {
+        bail!("Invalid Unity conflict session id")
+    }
+}
+
+fn materialize_preview_side(
+    repo: &gix::Repository,
+    session: &UnityConflictSession,
+    path: &str,
+    side: PreviewSide,
+    entry_id: Option<gix::ObjectId>,
+) -> Result<MaterializedPreviewSide> {
+    let Some(entry_id) = entry_id else {
+        return Ok(MaterializedPreviewSide {
+            file: None,
+            state: UnityConflictMaterializeState::Absent,
+            size: None,
+            lfs_tracked: false,
+        });
+    };
+    let object = repo.find_object(entry_id)?;
+    let blob = object.into_blob();
+    let data = &blob.data;
+    let destination = session.file_path(match side {
+        PreviewSide::Base => "base",
+        PreviewSide::Local => "local",
+        PreviewSide::Upstream => "upstream",
+    });
+
+    let Some(pointer) = but_core::lfs::parse_lfs_pointer(data) else {
+        fs::write(&destination, data)?;
+        return Ok(classify_materialized_file(destination, None, false));
+    };
+
+    if matches!(side, PreviewSide::Local)
+        && let Some(workdir) = repo.workdir()
+    {
+        let worktree_path = workdir.join(path);
+        if worktree_path.is_file() {
+            copy_file(&worktree_path, &destination)?;
+            if !file_starts_with_lfs_pointer(&destination)? {
+                return Ok(classify_materialized_file(
+                    destination,
+                    Some(pointer.size),
+                    true,
+                ));
             }
         }
     }
 
-    smudge_lfs_pointer(repo, path, content)
+    match smudge_lfs_pointer_to_file(repo, path, data, &destination) {
+        Ok(()) => Ok(classify_materialized_file(
+            destination,
+            Some(pointer.size),
+            true,
+        )),
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                path,
+                "failed to materialize Git LFS pointer for Unity preview"
+            );
+            Ok(MaterializedPreviewSide {
+                file: None,
+                state: UnityConflictMaterializeState::MissingLfsObject,
+                size: Some(pointer.size),
+                lfs_tracked: true,
+            })
+        }
+    }
 }
 
-fn is_git_lfs_pointer(content: &str) -> bool {
-    let mut lines = content.lines();
-    matches!(
-        lines.next(),
-        Some("version https://git-lfs.github.com/spec/v1")
-    ) && lines.any(|line| line.starts_with("oid sha256:"))
+fn classify_materialized_file(
+    path: PathBuf,
+    size: Option<u64>,
+    lfs_tracked: bool,
+) -> MaterializedPreviewSide {
+    let state = match file_starts_with_lfs_pointer(&path) {
+        Ok(true) => UnityConflictMaterializeState::PointerStillPresent,
+        Ok(false) => UnityConflictMaterializeState::TextReady,
+        Err(_) => UnityConflictMaterializeState::BinaryOrNonUtf8,
+    };
+    MaterializedPreviewSide {
+        file: Some(path),
+        state,
+        size,
+        lfs_tracked,
+    }
 }
 
-fn smudge_lfs_pointer(repo: &gix::Repository, path: &str, pointer: &str) -> Result<String> {
+fn copy_file(from: &Path, to: &Path) -> Result<()> {
+    let mut input =
+        File::open(from).with_context(|| format!("failed to open {}", from.display()))?;
+    let mut output =
+        File::create(to).with_context(|| format!("failed to create {}", to.display()))?;
+    io::copy(&mut input, &mut output)?;
+    Ok(())
+}
+
+fn file_starts_with_lfs_pointer(path: &Path) -> Result<bool> {
+    let mut file = File::open(path)?;
+    let mut buffer = [0_u8; 256];
+    let bytes_read = file.read(&mut buffer)?;
+    Ok(but_core::lfs::is_lfs_pointer(&buffer[..bytes_read]))
+}
+
+fn smudge_lfs_pointer_to_file(
+    repo: &gix::Repository,
+    path: &str,
+    pointer: &[u8],
+    destination: &Path,
+) -> Result<()> {
     let workdir = repo
         .workdir()
         .context("Git LFS Unity conflict previews require a worktree")?;
@@ -936,10 +1272,16 @@ fn smudge_lfs_pointer(repo: &gix::Repository, path: &str, pointer: &str) -> Resu
             .as_mut()
             .context("Failed to open git lfs smudge stdin")?;
         stdin
-            .write_all(pointer.as_bytes())
+            .write_all(pointer)
             .context("Failed to send Git LFS pointer to smudge")?;
     }
 
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("Failed to read Git LFS smudge output")?;
+    let mut output_file = File::create(destination)?;
+    io::copy(&mut stdout, &mut output_file)?;
     let output = child
         .wait_with_output()
         .context("Failed to finish git lfs smudge for Unity conflict preview")?;
@@ -950,17 +1292,298 @@ fn smudge_lfs_pointer(repo: &gix::Repository, path: &str, pointer: &str) -> Resu
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-
-    let content = String::from_utf8(output.stdout)
-        .context("Git LFS returned non-UTF-8 content for Unity conflict preview")?;
-    if is_git_lfs_pointer(&content) {
+    if file_starts_with_lfs_pointer(destination)? {
         bail!(
             "Git LFS returned another pointer for {}; run `git lfs pull --include=\"{}\"` and try again.",
             path,
             path
         );
     }
-    Ok(content)
+    Ok(())
+}
+
+fn merge_preview_files(base: &Path, local: &Path, upstream: &Path, merged: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .arg("merge-file")
+        .arg("-p")
+        .arg("-L")
+        .arg("local")
+        .arg("-L")
+        .arg("base")
+        .arg("-L")
+        .arg("upstream")
+        .arg(local)
+        .arg(base)
+        .arg(upstream)
+        .output()
+        .context("failed to run git merge-file for Unity conflict preview")?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        bail!(
+            "git merge-file could not build a Unity conflict preview: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    fs::write(merged, output.stdout)?;
+    Ok(())
+}
+
+fn parse_unity_conflict_blocks(path: &Path) -> Result<Vec<UnityConflictPreviewBlock>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut blocks = Vec::new();
+    let mut context = String::new();
+    let mut lines = reader.lines();
+
+    while let Some(line) = lines.next() {
+        let line = line.context("Unity conflict preview is not valid UTF-8")?;
+        if !line.starts_with("<<<<<<<") {
+            remember_context_line(&mut context, &line);
+            continue;
+        }
+
+        let mut ours = String::new();
+        for line in lines.by_ref() {
+            let line = line.context("Unity conflict preview is not valid UTF-8")?;
+            if line.starts_with("=======") {
+                break;
+            }
+            ours.push_str(&line);
+            ours.push('\n');
+        }
+
+        let mut theirs = String::new();
+        for line in lines.by_ref() {
+            let line = line.context("Unity conflict preview is not valid UTF-8")?;
+            if line.starts_with(">>>>>>>") {
+                break;
+            }
+            theirs.push_str(&line);
+            theirs.push('\n');
+        }
+
+        let index = blocks.len() + 1;
+        blocks.push(UnityConflictPreviewBlock {
+            id: format!("conflict-{index}"),
+            label: infer_unity_conflict_label(&context, &ours, &theirs, index),
+            context: if context.is_empty() {
+                "Unity YAML conflict".to_owned()
+            } else {
+                context.clone()
+            },
+            ours,
+            theirs,
+            fields: Vec::new(),
+        });
+    }
+
+    Ok(blocks)
+}
+
+fn remember_context_line(context: &mut String, line: &str) {
+    let trimmed = line.trim();
+    if trimmed.is_empty()
+        || trimmed.starts_with("%YAML")
+        || trimmed.starts_with("%TAG")
+        || trimmed.starts_with("--- !u!")
+    {
+        return;
+    }
+    *context = trimmed.chars().take(120).collect();
+}
+
+fn infer_unity_conflict_label(context: &str, ours: &str, theirs: &str, index: usize) -> String {
+    ours.lines()
+        .chain(theirs.lines())
+        .map(str::trim)
+        .find(|line| {
+            line.split_once(':')
+                .is_some_and(|(key, _)| key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        })
+        .and_then(|line| line.split_once(':').map(|(key, _)| key.to_owned()))
+        .or_else(|| (!context.is_empty()).then(|| context.to_owned()))
+        .unwrap_or_else(|| format!("Conflict {index}"))
+}
+
+pub fn apply_unity_conflict_resolution(
+    ctx: &Context,
+    input: UnityConflictResolutionInput,
+) -> Result<()> {
+    let session = UnityConflictSession::open(ctx.project_data_dir(), &input.session_id)?;
+    let meta = session.read_meta()?;
+    if meta.path != input.path.replace('\\', "/") {
+        bail!("Unity conflict resolution path does not match the preview session");
+    }
+
+    let workdir = ctx.workdir_or_fail()?;
+    let relative = safe_relative_path(&meta.path)?;
+    let destination = workdir.join(&relative);
+    snapshot_unity_file(ctx, &destination, &meta.path)?;
+
+    let resolved = session.file_path("resolved");
+    match input.resolution {
+        UnityConflictResolution::Blocks { blocks } => {
+            let Some(merged) = meta.merged else {
+                bail!("Unity conflict session does not have a merge preview to resolve");
+            };
+            apply_block_resolutions(&merged, &resolved, &blocks)?;
+        }
+        UnityConflictResolution::Local => {
+            let Some(local) = meta.local else {
+                bail!("Local Unity file is not available for this conflict");
+            };
+            copy_file(&local, &resolved)?;
+        }
+        UnityConflictResolution::Upstream => {
+            let Some(upstream) = meta.upstream else {
+                bail!(
+                    "Upstream Unity file is not available for this conflict. Run `git lfs pull` and try again."
+                );
+            };
+            copy_file(&upstream, &resolved)?;
+        }
+    }
+
+    validate_resolved_unity_file(&resolved)?;
+    replace_worktree_file(&resolved, &destination)?;
+    validate_resolved_unity_file(&destination)?;
+    Ok(())
+}
+
+fn apply_block_resolutions(
+    merged: &Path,
+    resolved: &Path,
+    blocks: &HashMap<String, String>,
+) -> Result<()> {
+    let input = File::open(merged)?;
+    let mut output = File::create(resolved)?;
+    let reader = BufReader::new(input);
+    let mut lines = reader.lines();
+    let mut block_index = 0;
+
+    while let Some(line) = lines.next() {
+        let line = line.context("Unity conflict preview is not valid UTF-8")?;
+        if !line.starts_with("<<<<<<<") {
+            writeln!(output, "{line}")?;
+            continue;
+        }
+
+        block_index += 1;
+        let block_id = format!("conflict-{block_index}");
+        for line in lines.by_ref() {
+            let line = line.context("Unity conflict preview is not valid UTF-8")?;
+            if line.starts_with("=======") {
+                break;
+            }
+        }
+        for line in lines.by_ref() {
+            let line = line.context("Unity conflict preview is not valid UTF-8")?;
+            if line.starts_with(">>>>>>>") {
+                break;
+            }
+        }
+
+        let replacement = blocks
+            .get(&block_id)
+            .with_context(|| format!("Missing Unity conflict resolution for {block_id}"))?;
+        output.write_all(replacement.as_bytes())?;
+        if !replacement.ends_with('\n') {
+            writeln!(output)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_resolved_unity_file(path: &Path) -> Result<()> {
+    if file_starts_with_lfs_pointer(path)? {
+        bail!(
+            "Refusing to write Git LFS pointer text as a Unity scene. Run `git lfs pull` and try again."
+        );
+    }
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.context("Resolved Unity file is not valid UTF-8")?;
+        if line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>")
+        {
+            bail!("The resolved Unity scene still contains conflict markers");
+        }
+    }
+    Ok(())
+}
+
+fn replace_worktree_file(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let parent = destination
+        .parent()
+        .context("Unity conflict destination must have a parent directory")?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    {
+        let mut input = File::open(source)?;
+        io::copy(&mut input, &mut temp)?;
+        temp.flush()?;
+    }
+    temp.persist(destination)
+        .map(|_| ())
+        .map_err(|err| err.error)
+        .context("failed to replace resolved Unity file")
+}
+
+fn snapshot_unity_file(ctx: &Context, destination: &Path, display_path: &str) -> Result<()> {
+    if !destination.exists() {
+        return Ok(());
+    }
+    let snapshot_root = ctx
+        .project_data_dir()
+        .join("unity-conflict-snapshots")
+        .join(format!(
+            "{}-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+            Uuid::new_v4()
+        ));
+    let relative = safe_relative_path(display_path)?;
+    let snapshot_path = snapshot_root.join(&relative);
+    if let Some(parent) = snapshot_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    copy_file(destination, &snapshot_path)?;
+    let pointer = {
+        let mut bytes = Vec::new();
+        File::open(destination)?.take(512).read_to_end(&mut bytes)?;
+        but_core::lfs::parse_lfs_pointer(&bytes)
+    };
+    fs::write(
+        snapshot_root.join("metadata.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "path": display_path,
+            "snapshotPath": snapshot_path,
+            "lfsPointer": pointer,
+        }))?,
+    )?;
+    Ok(())
+}
+
+fn safe_relative_path(path: &str) -> Result<PathBuf> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        bail!("Unity conflict path must be relative");
+    }
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => out.push(value),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                bail!("Unity conflict path escapes the repository")
+            }
+        }
+    }
+    if out.as_os_str().is_empty() {
+        bail!("Unity conflict path is empty");
+    }
+    Ok(out)
 }
 
 pub(crate) fn resolve_upstream_integration(

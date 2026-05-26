@@ -53,6 +53,15 @@ export declare function branchDiff(projectId: string, branch: string): Promise<T
 export declare function changesInWorktree(projectId: string): Promise<WorktreeChanges>
 
 /**
+ * Fast file-list preview of tracked worktree changes.
+ *
+ * This intentionally skips untracked-file enumeration, hunk assignments, and
+ * dependency calculation. Use [`changes_in_worktree()`] when the caller needs
+ * complete commit-ready data.
+ */
+export declare function changesInWorktreeTrackedFileList(projectId: string): Promise<WorktreeChanges>
+
+/**
  * This UI-version of [`but_core::diff::worktree_changes()`] simplifies the `git status` information for display in
  * the user interface as it is right now. From here, it's always possible to add more information as the need arises.
  *
@@ -266,6 +275,8 @@ export declare function publishReview(projectId: string, params: CreateForgeRevi
 
 export declare function pushStackLegacy(projectId: string, stackId: string, withForce: boolean, skipForcePushProtection: boolean, branch: string, runHooks: boolean): Promise<PushResult>
 
+export declare function pushStackToTarget(projectId: string, stackId: string, withForce: boolean, skipForcePushProtection: boolean, runHooks: boolean): Promise<PushResult>
+
 /**
  * Remove a branch from a stack.
  *
@@ -290,6 +301,9 @@ export declare function restoreSnapshotWithKind(projectId: string, restoreKind: 
  * from the git config.
  */
 export declare function reviewTemplate(projectId: string): Promise<ReviewTemplateInfo | null>
+
+/** Run Unity Smart Merge for a conflicted Unity path. */
+export declare function runUnitySmartMerge(projectId: string, path: PathBuf): Promise<UnitySmartMergeOutcome>
 
 /** Enable or disable a review's auto-merge. */
 export declare function setReviewAutoMerge(projectId: string, reviewId: number, enable: boolean): Promise<void>
@@ -331,6 +345,12 @@ export declare function treeChangeDiffs(projectId: string, change: TreeChange): 
  * delegating to the underlying mutation.
  */
 export declare function unapplyStack(projectId: string, stackId: string): Promise<void>
+
+/** Return a semantic Unity scene/prefab diff for supported files. */
+export declare function unitySemanticDiff(projectId: string, change: TreeChange): Promise<UnitySemanticDiffForFrontend | null>
+
+/** Return the current Unity Smart Merge availability for a project. */
+export declare function unitySmartMergePreview(projectId: string, path: PathBuf): Promise<UnitySmartMergeStatus>
 
 /**
  * Change the branch name from `branch_name` to `new_name` in the stack
@@ -2104,6 +2124,216 @@ export type UnifiedPatch = {
   };
 };
 
+/** A Unity asset reference resolved from a GUID in a `.meta` file. */
+export type UnityAssetReference = {
+  /** Unity asset GUID. */
+  guid: string;
+  /** Repository-relative Unity asset path. */
+  path: string;
+  /** Asset filename. */
+  name: string;
+  /** File extension without the dot, when present. */
+  kind: string | null;
+};
+
+/** A coarse semantic change kind. */
+export type UnityChangeKind = "added" | "removed" | "modified" | "moved" | "unchanged";
+
+export type UnityConflictLfsInfo = {
+  tracked: boolean;
+  base: UnityConflictSideState;
+  local: UnityConflictSideState;
+  upstream: UnityConflictSideState;
+};
+
+export type UnityConflictMaterializeState = "textReady" | "missingLfsObject" | "binaryOrNonUtf8" | "pointerStillPresent" | "absent";
+
+export type UnityConflictPreviewBlock = {
+  id: string;
+  label: string;
+  context: string;
+  ours: string;
+  theirs: string;
+  fields: Array<UnityConflictPreviewField>;
+};
+
+export type UnityConflictPreviewDocument = {
+  path: string;
+  blocks: Array<UnityConflictPreviewBlock>;
+};
+
+export type UnityConflictPreviewField = {
+  id: string;
+  label: string;
+  ours: string;
+  theirs: string;
+};
+
+export type UnityConflictResolution = {
+  blocks: Record<string, string>;
+  type: "blocks";
+} | {
+  type: "local";
+} | {
+  type: "upstream";
+};
+
+export type UnityConflictResolutionInput = {
+  sessionId: string;
+  path: string;
+  resolution: UnityConflictResolution;
+};
+
+export type UnityConflictSide = "local" | "upstream";
+
+export type UnityConflictSideState = {
+  state: UnityConflictMaterializeState;
+  size: number | null;
+};
+
+/** The Unity YAML file kind supported by the semantic lens. */
+export type UnityFileKind = "scene" | "prefab";
+
+/** A 1-based line selected inside a diff hunk. */
+export type UnityLineId = {
+  /** Old-file line number, when the selected diff row has one. */
+  oldLine: number | null;
+  /** New-file line number, when the selected diff row has one. */
+  newLine: number | null;
+};
+
+/** A Unity semantic object kind. */
+export type UnityNodeKind = "gameObject" | "component" | "property" | "prefabOverride" | "warning";
+
+/** A hunk that a semantic Unity row can select. */
+export type UnitySelectableHunk = {
+  /** Previous file start line. */
+  oldStart: number;
+  /** Previous file line count. */
+  oldLines: number;
+  /** Current file start line. */
+  newStart: number;
+  /** Current file line count. */
+  newLines: number;
+  /** Exact selected lines when available. Empty means select the whole hunk. */
+  lines: Array<UnityLineId>;
+};
+
+/** Selection metadata for a semantic Unity row. */
+export type UnitySelection = {
+  /** Selection precision. */
+  mode: UnitySelectionMode;
+  /** Hunk mappings for hunk/precise selection. */
+  hunks: Array<UnitySelectableHunk>;
+};
+
+/** How safely a semantic Unity row maps to GitButler's existing hunk selection model. */
+export type UnitySelectionMode = "precise" | "hunk" | "file" | "unavailable";
+
+/** A Unity semantic property change enriched with selection data. */
+export type UnitySemanticChangeForFrontend = {
+  /** Human-readable change label. */
+  label: string;
+  /** Unity serialized property path. */
+  propertyPath: string;
+  /** Previous value, if any. */
+  oldValue: string | null;
+  /** Current value, if any. */
+  newValue: string | null;
+  /** Resolved previous Unity asset reference, if any. */
+  oldReference: UnityAssetReference | null;
+  /** Resolved current Unity asset reference, if any. */
+  newReference: UnityAssetReference | null;
+  /** Coarse change kind. */
+  changeKind: UnityChangeKind;
+  /** Selection metadata. */
+  selection: UnitySelection;
+};
+
+/** A Unity semantic diff enriched for frontend selection behavior. */
+export type UnitySemanticDiffForFrontend = {
+  /** File kind. */
+  fileKind: UnityFileKind;
+  /** Summary counts. */
+  summary: UnitySemanticSummary;
+  /** Top-level semantic nodes. */
+  nodes: Array<UnitySemanticNodeForFrontend>;
+  /** Parser warnings. */
+  warnings: Array<UnitySemanticWarning>;
+  /** Whether a raw diff is available as fallback. */
+  rawAvailable: boolean;
+};
+
+/** A Unity semantic node enriched with selection data. */
+export type UnitySemanticNodeForFrontend = {
+  /** Stable node id. */
+  id: string;
+  /** Human-readable label. */
+  label: string;
+  /** Node kind. */
+  kind: UnityNodeKind;
+  /** Coarse change kind. */
+  changeKind: UnityChangeKind;
+  /** Human-readable hierarchy path. */
+  path: string;
+  /** Unity class name when known. */
+  className: string | null;
+  /** Child nodes. */
+  children: Array<any>;
+  /** Property changes. */
+  changes: Array<UnitySemanticChangeForFrontend>;
+  /** Selection metadata. */
+  selection: UnitySelection;
+};
+
+/** Summary counts for a Unity semantic diff. */
+export type UnitySemanticSummary = {
+  /** Changed GameObject count. */
+  objectsChanged: number;
+  /** Changed component count. */
+  componentsChanged: number;
+  /** Changed prefab override count. */
+  prefabOverridesChanged: number;
+  /** Changed serialized property count. */
+  propertiesChanged: number;
+  /** Parser warning count. */
+  warnings: number;
+};
+
+/** A warning produced while parsing or diffing Unity YAML. */
+export type UnitySemanticWarning = {
+  /** Human-readable warning message. */
+  message: string;
+  /** File line associated with the warning, if known. */
+  line: number | null;
+};
+
+/** Result of a user-triggered Unity Smart Merge run. */
+export type UnitySmartMergeOutcome = {
+  /** Whether the command exited successfully. */
+  success: boolean;
+  /** Whether conflict markers remain after running. */
+  unresolvedMarkersRemaining: boolean;
+  /** Whether the file content changed. */
+  fileChanged: boolean;
+  /** Process stdout summary. */
+  stdout: string;
+  /** Process stderr summary. */
+  stderr: string;
+  /** Human-readable outcome message. */
+  message: string;
+};
+
+/** Availability information for Unity Smart Merge. */
+export type UnitySmartMergeStatus = {
+  /** Whether GitButler can attempt Unity Smart Merge. */
+  available: boolean;
+  /** Human-readable command/tool description. */
+  command: string | null;
+  /** Message explaining availability or missing setup. */
+  message: string;
+};
+
 /**
  * Commit that is only at the remote.
  * Unlike the `Commit` struct, there is no knowledge of GitButler concepts like conflicted state etc.
@@ -2192,4 +2422,16 @@ export type WorktreeChanges = {
   dependencies: HunkDependencies | null;
   dependenciesError: SerdeError | null;
 };
+
+export type WorktreeConflictPreview = {
+  path: string;
+  mode: WorktreeConflictPreviewMode;
+  sessionId: string;
+  lfs: UnityConflictLfsInfo;
+  document: UnityConflictPreviewDocument | null;
+  availableChoices: Array<UnityConflictSide>;
+  message: string | null;
+};
+
+export type WorktreeConflictPreviewMode = "mergePreview" | "chooseSide";
 

@@ -7,12 +7,7 @@
 	import UnityConflictWorkbench from "$components/workspace/UnityConflictWorkbench.svelte";
 	import { createYucpLogoBadge } from "$lib/branding/yucpLogo";
 	import { descriptionTitle } from "$lib/commits/commit";
-	import { FILE_SERVICE } from "$lib/files/fileService";
-	import {
-		isUnityYamlPath,
-		parseUnityConflictDocument,
-		type UnityConflictDocument,
-	} from "$lib/files/unityConflicts";
+	import { isUnityYamlPath, type UnityConflictDocument } from "$lib/files/unityConflicts";
 	import { DEFAULT_FORGE_FACTORY } from "$lib/forge/forgeFactory.svelte";
 	import { STACK_SERVICE } from "$lib/stacks/stackService.svelte";
 	import {
@@ -22,6 +17,8 @@
 		getResolutionApproachV3,
 		type StackStatusInfoV3,
 		type StackStatusesWithBranchesV3,
+		type UnityConflictResolutionInput,
+		type UnityConflictSide,
 	} from "$lib/upstream/types";
 	import { UPSTREAM_INTEGRATION_SERVICE } from "$lib/upstream/upstreamIntegrationService.svelte";
 	import { inject } from "@gitbutler/core/context";
@@ -83,7 +80,6 @@
 	// const forgeListingService = $derived(forge.current.listService);
 	const backend = inject(BACKEND);
 	const stackService = inject(STACK_SERVICE);
-	const fileService = inject(FILE_SERVICE);
 	const baseBranchService = inject(BASE_BRANCH_SERVICE);
 	const baseBranchQuery = $derived(baseBranchService.baseBranch(projectId));
 	const base = $derived(baseBranchQuery.response);
@@ -112,10 +108,12 @@
 	let selectedIncomingCommitId = $state<string | undefined>();
 	let conflictPreviewModal = $state<Modal>();
 	let conflictPreviewPath = $state("");
+	let conflictPreviewSessionId = $state("");
 	let conflictPreviewDocument = $state<UnityConflictDocument | undefined>();
 	let conflictPreviewError = $state<string | undefined>();
+	let conflictPreviewChoices = $state<UnityConflictSide[]>([]);
 	let conflictPreviewLoading = $state(false);
-	let pendingUnityResolutions = $state<Record<string, string>>({});
+	let pendingUnityResolutions = $state<Record<string, UnityConflictResolutionInput>>({});
 	let backupBeforeUpdate = $state(true);
 	let backupError = $state<string | undefined>();
 	let activeProgress = $derived(
@@ -353,8 +351,8 @@
 			resolutions: Array.from(results.values()),
 			baseBranchResolution: baseResolution,
 		});
-		for (const [path, content] of Object.entries(pendingUnityResolutions)) {
-			await fileService.writeToWorkspace(path, projectId, content);
+		for (const resolution of Object.values(pendingUnityResolutions)) {
+			await upstreamIntegrationService.applyUnityConflictResolution(projectId, resolution);
 		}
 		await baseBranchService.refreshBaseBranch(projectId);
 		integratingUpstream = "completed";
@@ -507,8 +505,10 @@
 
 	async function openUnityConflictPreview(path: string) {
 		conflictPreviewPath = path;
+		conflictPreviewSessionId = "";
 		conflictPreviewDocument = undefined;
 		conflictPreviewError = undefined;
+		conflictPreviewChoices = [];
 		conflictPreviewLoading = true;
 		conflictPreviewModal?.show();
 
@@ -518,25 +518,20 @@
 				targetCommitOid,
 				path,
 			);
-			if (!preview?.local || !preview.upstream) {
-				conflictPreviewError = "GitButler could not load the local and upstream versions.";
+			if (!preview) {
+				conflictPreviewError = "GitButler could not load a conflict preview for this file.";
 				return;
 			}
-			const conflictContent = [
-				"<<<<<<< local\n",
-				preview.local,
-				preview.local.endsWith("\n") ? "" : "\n",
-				"=======\n",
-				preview.upstream,
-				preview.upstream.endsWith("\n") ? "" : "\n",
-				">>>>>>> upstream\n",
-			].join("");
-			const document = parseUnityConflictDocument(path, conflictContent);
-			if (!document) {
-				conflictPreviewError = "GitButler could not build a scene conflict preview for this file.";
+			conflictPreviewSessionId = preview.sessionId;
+			conflictPreviewChoices = preview.availableChoices;
+			if (preview.mode === "mergePreview" && preview.document) {
+				conflictPreviewDocument = preview.document;
 				return;
 			}
-			conflictPreviewDocument = document;
+			conflictPreviewError =
+				preview.message ??
+				"GitButler could not build a scene conflict preview for this file. Choose one side explicitly.";
+			conflictPreviewDocument = undefined;
 		} catch (error) {
 			conflictPreviewError = errorMessage(error);
 		} finally {
@@ -545,9 +540,31 @@
 	}
 
 	function handlePreviewResolution(resolvedContent: string) {
+		void resolvedContent;
+	}
+
+	function handlePreviewBlockResolution(blocks: Record<string, string>) {
+		if (!conflictPreviewSessionId) return;
 		pendingUnityResolutions = {
 			...pendingUnityResolutions,
-			[conflictPreviewPath]: resolvedContent,
+			[conflictPreviewPath]: {
+				sessionId: conflictPreviewSessionId,
+				path: conflictPreviewPath,
+				resolution: { type: "blocks", blocks },
+			},
+		};
+		void conflictPreviewModal?.close();
+	}
+
+	function handlePreviewSideChoice(side: UnityConflictSide) {
+		if (!conflictPreviewSessionId) return;
+		pendingUnityResolutions = {
+			...pendingUnityResolutions,
+			[conflictPreviewPath]: {
+				sessionId: conflictPreviewSessionId,
+				path: conflictPreviewPath,
+				resolution: { type: side },
+			},
 		};
 		void conflictPreviewModal?.close();
 	}
@@ -673,7 +690,9 @@
 
 	function upstreamBackupBranchNames(): string[] {
 		if (branchStatuses?.type !== "updatesRequired") return [];
-		return Array.from(new Set(statuses.flatMap(({ stack }) => stack.heads.map((head) => head.name))));
+		return Array.from(
+			new Set(statuses.flatMap(({ stack }) => stack.heads.map((head) => head.name))),
+		);
 	}
 </script>
 
@@ -871,7 +890,9 @@
 														size={12}
 													/>
 													<span class="text-11 text-semibold">
-														{pendingUnityResolutions[file] ? "Resolution ready" : "Click to resolve"}
+														{pendingUnityResolutions[file]
+															? "Resolution ready"
+															: "Click to resolve"}
 													</span>
 												</span>
 											</span>
@@ -1055,6 +1076,16 @@
 				<div class="unity-preview-modal__state">
 					<p class="text-13 text-body">{conflictPreviewError}</p>
 					<div class="unity-preview-modal__actions">
+						{#if conflictPreviewChoices.includes("local")}
+							<Button kind="outline" onclick={() => handlePreviewSideChoice("local")}>
+								Keep local
+							</Button>
+						{/if}
+						{#if conflictPreviewChoices.includes("upstream")}
+							<Button kind="outline" onclick={() => handlePreviewSideChoice("upstream")}>
+								Use upstream
+							</Button>
+						{/if}
 						<Button kind="outline" onclick={close}>Close</Button>
 					</div>
 				</div>
@@ -1063,6 +1094,7 @@
 					filePath={conflictPreviewPath}
 					document={conflictPreviewDocument}
 					onApply={handlePreviewResolution}
+					onApplyBlocks={handlePreviewBlockResolution}
 				/>
 			{/if}
 		</div>
@@ -1262,8 +1294,8 @@
 
 	.conflict-row__details {
 		display: inline-flex;
-		align-items: center;
 		flex: none;
+		align-items: center;
 		gap: 8px;
 	}
 
@@ -1275,14 +1307,14 @@
 		border: 1px solid color-mix(in srgb, var(--fill-danger-bg) 18%, transparent);
 		border-radius: 999px;
 		background: color-mix(in srgb, var(--bg-1) 24%, transparent);
-		opacity: 0.72;
 		box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-1) 6%, transparent);
+		opacity: 0.72;
 	}
 
 	.conflict-row__status {
 		display: inline-flex;
-		align-items: center;
 		flex: none;
+		align-items: center;
 		gap: 6px;
 		color: var(--text-2);
 		white-space: nowrap;

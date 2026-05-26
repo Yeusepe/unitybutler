@@ -231,6 +231,14 @@ pub fn integrate_upstream(
     )
 }
 
+pub fn apply_unity_conflict_resolution(
+    ctx: &mut Context,
+    input: upstream_integration::UnityConflictResolutionInput,
+) -> Result<()> {
+    let _guard = ctx.exclusive_worktree_access();
+    upstream_integration::apply_unity_conflict_resolution(ctx, input)
+}
+
 pub fn resolve_upstream_integration(
     ctx: &mut Context,
     resolution_approach: BaseBranchResolutionApproach,

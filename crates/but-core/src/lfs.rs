@@ -10,6 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 const GIT_LFS_SKIP_SMUDGE_ENV: &str = "GIT_LFS_SKIP_SMUDGE";
 
@@ -77,8 +78,43 @@ impl Default for LfsFastOperationScope {
 
 /// Return true if `bytes` look like a Git LFS pointer file.
 pub fn is_lfs_pointer(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"version https://git-lfs.github.com/spec/v1\n")
-        || bytes.starts_with(b"version https://git-lfs.github.com/spec/v1\r\n")
+    parse_lfs_pointer(bytes).is_some()
+}
+
+/// Canonical metadata extracted from a Git LFS pointer file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LfsPointer {
+    /// The SHA-256 object id for the Git LFS media object.
+    pub oid: String,
+    /// The declared media object size in bytes.
+    pub size: u64,
+}
+
+/// Parse a canonical Git LFS pointer file.
+pub fn parse_lfs_pointer(bytes: &[u8]) -> Option<LfsPointer> {
+    let content = std::str::from_utf8(bytes).ok()?;
+    let content = content.replace("\r\n", "\n");
+    let mut lines = content.lines();
+    if lines.next()? != "version https://git-lfs.github.com/spec/v1" {
+        return None;
+    }
+
+    let mut oid = None;
+    let mut size = None;
+    for line in lines {
+        if let Some(value) = line.strip_prefix("oid sha256:") {
+            if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                oid = Some(value.to_owned());
+            }
+        } else if let Some(value) = line.strip_prefix("size ") {
+            size = value.parse::<u64>().ok();
+        }
+    }
+
+    Some(LfsPointer {
+        oid: oid?,
+        size: size?,
+    })
 }
 
 /// Replace LFS pointer files in the worktree with their local media objects.
@@ -174,7 +210,7 @@ fn hydrate_pointer_files(
         let Some(second) = oid.get(2..4) else {
             continue;
         };
-        let object_path = lfs_objects_dir.join(first).join(second).join(oid);
+        let object_path = lfs_objects_dir.join(first).join(second).join(&oid);
         if object_path.is_file() {
             fs::copy(&object_path, &worktree_path).with_context(|| {
                 format!(
@@ -188,12 +224,8 @@ fn hydrate_pointer_files(
     Ok(())
 }
 
-fn pointer_oid(bytes: &[u8]) -> Option<&str> {
-    let content = std::str::from_utf8(bytes).ok()?;
-    content.lines().find_map(|line| {
-        line.strip_prefix("oid sha256:")
-            .filter(|oid| oid.len() >= 4)
-    })
+fn pointer_oid(bytes: &[u8]) -> Option<String> {
+    parse_lfs_pointer(bytes).map(|pointer| pointer.oid)
 }
 
 fn run_git_lfs_checkout<'a>(
@@ -252,7 +284,9 @@ impl Drop for LfsFastOperationScope {
 
 #[cfg(test)]
 mod tests {
-    use super::{GIT_LFS_SKIP_SMUDGE_ENV, LfsFastOperationScope, is_lfs_pointer};
+    use super::{
+        GIT_LFS_SKIP_SMUDGE_ENV, LfsFastOperationScope, is_lfs_pointer, parse_lfs_pointer,
+    };
 
     #[test]
     fn restores_skip_smudge_env() {
@@ -303,19 +337,42 @@ mod tests {
     fn detects_lfs_pointer_content() {
         assert!(
             is_lfs_pointer(
-                b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 123\n"
+                b"version https://git-lfs.github.com/spec/v1\noid sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd\nsize 123\n"
             ),
             "Git LFS pointers must be detected before they are left in the worktree"
         );
         assert!(
             is_lfs_pointer(
-                b"version https://git-lfs.github.com/spec/v1\r\noid sha256:abc\r\nsize 123\r\n"
+                b"version https://git-lfs.github.com/spec/v1\r\noid sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd\r\nsize 123\r\n"
             ),
             "Git LFS pointers may use CRLF line endings on Windows"
         );
         assert!(
             !is_lfs_pointer(b"%YAML 1.1\n%TAG !u! tag:unity3d.com,2011:\n"),
             "Unity scene YAML must not be mistaken for a Git LFS pointer"
+        );
+    }
+
+    #[test]
+    fn parses_strict_lfs_pointer() {
+        let pointer = parse_lfs_pointer(
+            b"version https://git-lfs.github.com/spec/v1\noid sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd\nsize 500000000\n",
+        )
+        .expect("canonical pointer should parse");
+        assert_eq!(
+            pointer.oid, "abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+            "parsed pointer must expose the media object id"
+        );
+        assert_eq!(
+            pointer.size, 500000000,
+            "parsed pointer must expose media size"
+        );
+        assert!(
+            parse_lfs_pointer(
+                b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 123\n"
+            )
+            .is_none(),
+            "short object ids are not canonical Git LFS pointers"
         );
     }
 

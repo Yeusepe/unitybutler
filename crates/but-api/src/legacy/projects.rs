@@ -5,7 +5,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use but_api_macros::but_api;
-use but_core::git_config::{edit_repo_config, remove_config_value, set_config_value};
+use but_core::git_config::{edit_repo_config, set_config_value};
 use but_ctx::{Context, ProjectHandleOrLegacyProjectId};
 use but_error::Code;
 use gix::bstr::ByteSlice;
@@ -16,6 +16,8 @@ use crate::local_ignores;
 
 const LFS_UNITYYAMLMERGE_DRIVER: &str = "lfs-unityyamlmerge";
 const LFS_UNITYYAMLMERGE_NAME: &str = "Git LFS + UnityYAMLMerge";
+const UNITYYAMLMERGE_DRIVER: &str = "unityyamlmerge";
+const UNITYYAMLMERGE_NAME: &str = "Unity SmartMerge (UnityYamlMerge)";
 const UNITY_LFS_TEXT_ATTRIBUTES: &str = "*.unity  filter=lfs diff=lfs merge=lfs-unityyamlmerge -text\n*.prefab filter=lfs diff=lfs merge=lfs-unityyamlmerge -text";
 
 #[but_api]
@@ -175,10 +177,10 @@ pub struct UnityAutofixOutcome {
     pub force_text_updated: bool,
     /// Whether UnityYAMLMerge was configured as the regular Git mergetool for non-LFS conflicts.
     pub unity_yaml_merge_mergetool_configured: bool,
+    /// Whether UnityYAMLMerge was configured as the low-level Git merge driver.
+    pub unity_yaml_merge_driver_configured: bool,
     /// Whether the LFS-backed UnityYAMLMerge text merge driver was configured locally.
     pub lfs_unity_yaml_merge_driver_configured: bool,
-    /// Whether unsafe low-level UnityYAMLMerge driver config was removed from local Git config.
-    pub unity_yaml_merge_driver_removed: bool,
     /// Number of filter-managed tracked paths added to GitButler's repo-local ignore list.
     pub locally_ignored_paths_added: usize,
     /// Any remaining checks that still need manual user action.
@@ -194,8 +196,8 @@ pub fn autofix_unity_project(ctx: &Context) -> Result<UnityAutofixOutcome> {
         return Ok(UnityAutofixOutcome {
             force_text_updated: false,
             unity_yaml_merge_mergetool_configured: false,
+            unity_yaml_merge_driver_configured: false,
             lfs_unity_yaml_merge_driver_configured: false,
-            unity_yaml_merge_driver_removed: false,
             locally_ignored_paths_added: 0,
             remaining_headsup: None,
         });
@@ -204,8 +206,8 @@ pub fn autofix_unity_project(ctx: &Context) -> Result<UnityAutofixOutcome> {
         return Ok(UnityAutofixOutcome {
             force_text_updated: false,
             unity_yaml_merge_mergetool_configured: false,
+            unity_yaml_merge_driver_configured: false,
             lfs_unity_yaml_merge_driver_configured: false,
-            unity_yaml_merge_driver_removed: false,
             locally_ignored_paths_added: 0,
             remaining_headsup: None,
         });
@@ -213,7 +215,6 @@ pub fn autofix_unity_project(ctx: &Context) -> Result<UnityAutofixOutcome> {
 
     let force_text_updated = set_unity_asset_serialization_to_force_text(workdir)?;
     let merge_tool_setup = ensure_unity_merge_tools_are_configured(&repo, workdir, None)?;
-    let unity_yaml_merge_driver_removed = remove_unityyamlmerge_driver(&repo)?;
     let filter_paths = autofix_filter_paths(&repo)?;
     let filter_paths = filter_paths.iter().map(Path::new).collect::<Vec<&Path>>();
     let locally_ignored_paths_added =
@@ -224,10 +225,12 @@ pub fn autofix_unity_project(ctx: &Context) -> Result<UnityAutofixOutcome> {
         unity_yaml_merge_mergetool_configured: merge_tool_setup
             .as_ref()
             .is_some_and(|setup| setup.mergetool_configured),
+        unity_yaml_merge_driver_configured: merge_tool_setup
+            .as_ref()
+            .is_some_and(|setup| setup.merge_driver_configured),
         lfs_unity_yaml_merge_driver_configured: merge_tool_setup
             .as_ref()
             .is_some_and(|setup| setup.lfs_text_driver_configured),
-        unity_yaml_merge_driver_removed,
         locally_ignored_paths_added,
         remaining_headsup: join_headsup_messages([
             project_activation_headsup(&repo)?,
@@ -309,6 +312,13 @@ fn project_activation_headsup_with_unityyamlmerge_path(
                 setup.tool_path.display()
             ));
         }
+        if setup.merge_driver_configured {
+            notices.push(format!(
+                "Configured `merge.{}` as a local Git merge driver using `{}`.",
+                UNITYYAMLMERGE_DRIVER,
+                setup.tool_path.display()
+            ));
+        }
         if setup.lfs_text_driver_configured {
             notices.push(format!(
                 "Configured `{}` as a local Git LFS text merge driver using `{}`.",
@@ -340,22 +350,12 @@ fn project_activation_headsup_with_unityyamlmerge_path(
             .is_none_or(|setup| !setup.mergetool_configured)
             && gitattributes.contains("merge=unityyamlmerge")
             && !unityyamlmerge_mergetool_is_configured(repo)
+            && !unityyamlmerge_merge_driver_is_configured(repo)
         {
             warnings.push(
                 "`.gitattributes` references `merge=unityyamlmerge`, but this machine does not \
-                 have a Git config entry for `mergetool.unityyamlmerge.cmd`. GitButler only \
-                 configures UnityYAMLMerge as an explicit mergetool, not as a low-level merge \
-                 driver, because Git merge-driver temp files can make UnityYAMLMerge fail."
-                    .to_owned(),
-            );
-        }
-
-        if unityyamlmerge_merge_driver_is_configured(repo) {
-            warnings.push(
-                "`merge.unityyamlmerge.driver` is configured locally. This can make \
-                 UnityYAMLMerge fail on Git temporary files with messages like \
-                 \"Couldn't locate merge tool to handle extension merge_file_*\". Use the \
-                 UnityYAMLMerge mergetool instead."
+                 have local UnityYAMLMerge Git config. Use Autofix safe checks to configure \
+                 the local merge driver and mergetool."
                     .to_owned(),
             );
         }
@@ -597,6 +597,7 @@ fn join_headsup_messages<const N: usize>(messages: [Option<String>; N]) -> Optio
 struct UnityMergeToolSetup {
     tool_path: PathBuf,
     mergetool_configured: bool,
+    merge_driver_configured: bool,
     lfs_text_driver_configured: bool,
 }
 
@@ -609,26 +610,20 @@ fn ensure_unity_merge_tools_are_configured(
         return Ok(None);
     };
 
-    let mergetool_configured = if unityyamlmerge_is_fully_configured(repo) {
-        false
-    } else {
-        configure_unityyamlmerge(repo, &unityyamlmerge_path)?
-    };
-    let lfs_text_driver_configured =
-        if lfs_text_merge_driver_is_configured(repo, LFS_UNITYYAMLMERGE_DRIVER) {
-            false
-        } else {
-            configure_lfs_text_merge_driver(
-                repo,
-                LFS_UNITYYAMLMERGE_DRIVER,
-                LFS_UNITYYAMLMERGE_NAME,
-                &unityyamlmerge_program(&unityyamlmerge_path),
-            )?
-        };
+    let mergetool_configured = configure_unityyamlmerge(repo, &unityyamlmerge_path)?;
+    let merge_driver_configured =
+        configure_unityyamlmerge_merge_driver(repo, &unityyamlmerge_path)?;
+    let lfs_text_driver_configured = configure_lfs_text_merge_driver(
+        repo,
+        LFS_UNITYYAMLMERGE_DRIVER,
+        LFS_UNITYYAMLMERGE_NAME,
+        &unityyamlmerge_program(&unityyamlmerge_path),
+    )?;
 
     Ok(Some(UnityMergeToolSetup {
         tool_path: unityyamlmerge_path,
         mergetool_configured,
+        merge_driver_configured,
         lfs_text_driver_configured,
     }))
 }
@@ -646,15 +641,6 @@ fn unityyamlmerge_merge_driver_is_configured(repo: &gix::Repository) -> bool {
 fn lfs_text_merge_driver_is_configured(repo: &gix::Repository, driver: &str) -> bool {
     let config = repo.config_snapshot();
     config.string(&format!("merge.{driver}.driver")).is_some()
-}
-
-fn unityyamlmerge_is_fully_configured(repo: &gix::Repository) -> bool {
-    let config = repo.config_snapshot();
-    matches!(
-        config.string("merge.tool").map(|value| value.to_string()),
-        Some(value) if value == "unityyamlmerge"
-    ) && config.string("mergetool.unityyamlmerge.cmd").is_some()
-        && config.string("merge.unityyamlmerge.driver").is_none()
 }
 
 fn find_unityyamlmerge_path(workdir: &Path, explicit_tool_path: Option<&Path>) -> Option<PathBuf> {
@@ -698,9 +684,6 @@ fn unityyamlmerge_candidates(workdir: &Path) -> Vec<PathBuf> {
             );
         }
     } else if cfg!(target_os = "macos") {
-        candidates.push(PathBuf::from(
-            "/Applications/Unity/Hub/Editor/Unity.app/Contents/Tools/UnityYAMLMerge",
-        ));
         if let Some(version) = &version {
             candidates.push(
                 PathBuf::from("/Applications/Unity/Hub/Editor")
@@ -710,7 +693,18 @@ fn unityyamlmerge_candidates(workdir: &Path) -> Vec<PathBuf> {
                     .join("Tools")
                     .join("UnityYAMLMerge"),
             );
+            candidates.push(
+                PathBuf::from("/Applications/Unity/Hub/Editor")
+                    .join(version)
+                    .join("Unity.app")
+                    .join("Contents")
+                    .join("Helpers")
+                    .join("UnityYAMLMerge"),
+            );
         }
+        candidates.push(PathBuf::from(
+            "/Applications/Unity/Hub/Editor/Unity.app/Contents/Tools/UnityYAMLMerge",
+        ));
         candidates.push(PathBuf::from(
             "/Applications/Unity/Unity.app/Contents/Helpers/UnityYAMLMerge",
         ));
@@ -746,17 +740,43 @@ fn unity_editor_version(workdir: &Path) -> Option<String> {
 
 fn configure_unityyamlmerge(repo: &gix::Repository, unityyamlmerge_path: &Path) -> Result<bool> {
     let mergetool_cmd = format!(
-        r#"{} merge -p "$BASE" "$REMOTE" "$LOCAL" "$MERGED""#,
+        r#"{} merge -p -h --fallback none "$BASE" "$REMOTE" "$LOCAL" "$MERGED""#,
         shell_quoted_path(unityyamlmerge_path)
     );
 
     edit_repo_config(repo, gix::config::Source::Local, |config| {
         set_config_value(config, "merge.tool", "unityyamlmerge")?;
-        remove_config_value(config, "merge.unityyamlmerge.name")?;
-        remove_config_value(config, "merge.unityyamlmerge.driver")?;
-        remove_config_value(config, "merge.unityyamlmerge.recursive")?;
         set_config_value(config, "mergetool.unityyamlmerge.trustExitCode", "false")?;
         set_config_value(config, "mergetool.unityyamlmerge.cmd", &mergetool_cmd)?;
+        Ok(())
+    })
+}
+
+fn configure_unityyamlmerge_merge_driver(
+    repo: &gix::Repository,
+    unityyamlmerge_path: &Path,
+) -> Result<bool> {
+    let driver_cmd = format!(
+        r#"{} merge -p -h --fallback none "%O" "%B" "%A" "%A""#,
+        shell_quoted_path(unityyamlmerge_path)
+    );
+
+    edit_repo_config(repo, gix::config::Source::Local, |config| {
+        set_config_value(
+            config,
+            &format!("merge.{UNITYYAMLMERGE_DRIVER}.name"),
+            UNITYYAMLMERGE_NAME,
+        )?;
+        set_config_value(
+            config,
+            &format!("merge.{UNITYYAMLMERGE_DRIVER}.driver"),
+            &driver_cmd,
+        )?;
+        set_config_value(
+            config,
+            &format!("merge.{UNITYYAMLMERGE_DRIVER}.recursive"),
+            "binary",
+        )?;
         Ok(())
     })
 }
@@ -779,18 +799,9 @@ fn configure_lfs_text_merge_driver(
 
 fn unityyamlmerge_program(unityyamlmerge_path: &Path) -> String {
     format!(
-        r#"{} merge -p "%%O" "%%B" "%%A" "%%D""#,
+        r#"{} merge -p -h --fallback none --force "%%O" "%%B" "%%A" "%%D""#,
         shell_quoted_path(unityyamlmerge_path)
     )
-}
-
-fn remove_unityyamlmerge_driver(repo: &gix::Repository) -> Result<bool> {
-    edit_repo_config(repo, gix::config::Source::Local, |config| {
-        remove_config_value(config, "merge.unityyamlmerge.name")?;
-        remove_config_value(config, "merge.unityyamlmerge.driver")?;
-        remove_config_value(config, "merge.unityyamlmerge.recursive")?;
-        Ok(())
-    })
 }
 
 fn shell_quoted_path(path: &Path) -> String {
@@ -1196,52 +1207,6 @@ UserSettings/
     }
 
     #[test]
-    fn unity_autofix_removes_low_level_unityyamlmerge_driver() -> Result<()> {
-        let (mut repo, _tmp) = unity_repo(
-            r#"%YAML 1.1
-EditorSettings:
-  m_SerializationMode: 2
-"#,
-            Some(
-                r#"Library/
-Temp/
-Logs/
-UserSettings/
-"#,
-            ),
-            Some("*.prefab -text merge=unityyamlmerge diff\n"),
-            &[],
-        )?;
-        _ = edit_repo_config(&repo, gix::config::Source::Local, |config| {
-            set_config_value(config, "merge.unityyamlmerge.name", "Unity SmartMerge")?;
-            set_config_value(
-                config,
-                "merge.unityyamlmerge.driver",
-                "UnityYAMLMerge merge -p %O %A %B %A",
-            )?;
-            set_config_value(config, "merge.unityyamlmerge.recursive", "binary")?;
-            Ok(())
-        })?;
-
-        assert!(
-            remove_unityyamlmerge_driver(&repo)?,
-            "autofix should report removing unsafe low-level UnityYAMLMerge config"
-        );
-
-        repo.reload()?;
-        let config = repo.config_snapshot();
-        assert!(
-            config.string("merge.unityyamlmerge.driver").is_none(),
-            "autofix must remove the low-level merge driver that receives Git temp file paths"
-        );
-        assert!(
-            config.string("merge.unityyamlmerge.recursive").is_none(),
-            "autofix should remove the old driver companion config"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn project_activation_headsup_warns_when_unityyamlmerge_is_not_configured_locally() -> Result<()>
     {
         let (repo, _tmp) = unity_repo(
@@ -1266,8 +1231,8 @@ UserSettings/
             "must mention the missing UnityYAMLMerge setup: {headsup}"
         );
         assert!(
-            headsup.contains("mergetool.unityyamlmerge.cmd"),
-            "must point at the Git mergetool config key that needs local setup: {headsup}"
+            headsup.contains("local UnityYAMLMerge Git config"),
+            "must point at the local Git config that needs setup: {headsup}"
         );
         Ok(())
     }
@@ -1321,8 +1286,9 @@ UserSettings/
             config
                 .string("merge.unityyamlmerge.driver")
                 .map(|value| value.to_string())
-                .is_none(),
-            "must not configure the low-level merge driver because Git temp files can make UnityYAMLMerge fail"
+                .is_some_and(|value| value.contains("UnityYAMLMerge.exe")
+                    && value.contains("--fallback none")),
+            "must configure the UnityYAMLMerge driver command in local git config"
         );
         assert!(
             config

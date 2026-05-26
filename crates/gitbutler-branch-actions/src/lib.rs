@@ -6,6 +6,7 @@
 
 mod actions;
 // This is our API
+pub use actions::apply_unity_conflict_resolution;
 pub use actions::{
     create_virtual_branch, create_virtual_branch_from_branch_with_perm,
     get_initial_integration_steps_for_branch, integrate_branch_with_steps, integrate_upstream,

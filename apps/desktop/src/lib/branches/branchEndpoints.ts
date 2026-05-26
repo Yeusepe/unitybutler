@@ -8,7 +8,7 @@ import {
 import { createEntityAdapter, type EntityState } from "@reduxjs/toolkit";
 import type { ForgeProvider, RemoteBranchInfo } from "$lib/baseBranch/baseBranch";
 import type { BackendEndpointBuilder } from "$lib/state/backendApi";
-import type { WorktreeConflictPreview } from "$lib/upstream/types";
+import type { UnityConflictResolutionInput, WorktreeConflictPreview } from "$lib/upstream/types";
 import type { BaseBranch } from "@gitbutler/but-sdk";
 import type {
 	BaseBranchResolution,
@@ -137,6 +137,17 @@ export function buildBranchEndpoints(build: BackendEndpointBuilder) {
 				invalidatesList(ReduxTag.HeadSha),
 				invalidatesList(ReduxTag.BranchListing),
 			],
+		}),
+		applyUnityConflictResolution: build.mutation<
+			void,
+			{ projectId: string; input: UnityConflictResolutionInput }
+		>({
+			extraOptions: {
+				command: "apply_unity_conflict_resolution",
+				actionName: "Apply Unity Conflict Resolution",
+			},
+			query: (args) => args,
+			invalidatesTags: [invalidatesList(ReduxTag.WorktreeChanges)],
 		}),
 		resolveUpstreamIntegration: build.mutation<
 			string,

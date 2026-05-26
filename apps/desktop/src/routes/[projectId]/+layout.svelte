@@ -358,8 +358,8 @@
 	function unityAutofixMessage(outcome: {
 		forceTextUpdated: boolean;
 		unityYamlMergeMergetoolConfigured: boolean;
+		unityYamlMergeDriverConfigured: boolean;
 		lfsUnityYamlMergeDriverConfigured: boolean;
-		unityYamlMergeDriverRemoved: boolean;
 		locallyIgnoredPathsAdded: number;
 		remainingHeadsup?: string;
 	}) {
@@ -370,11 +370,11 @@
 		if (outcome.unityYamlMergeMergetoolConfigured) {
 			fixes.push("Configured UnityYAMLMerge as the local Git mergetool.");
 		}
+		if (outcome.unityYamlMergeDriverConfigured) {
+			fixes.push("Configured the local UnityYAMLMerge Git merge driver.");
+		}
 		if (outcome.lfsUnityYamlMergeDriverConfigured) {
 			fixes.push("Configured the local Git LFS text merge driver for Unity scenes and prefabs.");
-		}
-		if (outcome.unityYamlMergeDriverRemoved) {
-			fixes.push("Removed the local merge driver override; use git mergetool for scene conflicts.");
 		}
 		if (outcome.locallyIgnoredPathsAdded > 0) {
 			fixes.push(

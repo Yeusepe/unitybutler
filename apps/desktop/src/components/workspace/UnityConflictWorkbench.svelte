@@ -1,6 +1,7 @@
 <script lang="ts">
 	import {
 		applyUnityConflictResolutions,
+		resolveUnityConflictBlock,
 		type UnityConflictDocument,
 	} from "$lib/files/unityConflicts";
 
@@ -10,10 +11,11 @@
 		filePath: string;
 		document: UnityConflictDocument;
 		onApply: (resolvedContent: string) => Promise<void> | void;
+		onApplyBlocks?: (resolvedBlocks: Record<string, string>) => Promise<void> | void;
 		applying?: boolean;
 	};
 
-	const { filePath, document, onApply, applying = false }: Props = $props();
+	const { filePath, document, onApply, onApplyBlocks, applying = false }: Props = $props();
 
 	let resolutions = $state<Record<string, UnityConflictResolution>>({});
 	let activeDocumentPath = $state<string | undefined>();
@@ -27,7 +29,9 @@
 	const resolvedCount = $derived(document.blocks.filter((block) => blockResolved(block.id)).length);
 	const allResolved = $derived(resolvedCount === document.blocks.length);
 
-	function initialResolutions(document: UnityConflictDocument): Record<string, UnityConflictResolution> {
+	function initialResolutions(
+		document: UnityConflictDocument,
+	): Record<string, UnityConflictResolution> {
 		return Object.fromEntries(
 			document.blocks
 				.filter((block) => block.fields.length > 1)
@@ -113,6 +117,20 @@
 	async function handleApply() {
 		if (!allResolved) return;
 
+		if (onApplyBlocks) {
+			const resolvedBlocks = Object.fromEntries(
+				document.blocks.map((block) => {
+					const resolution = resolutions[block.id];
+					if (!resolution) {
+						throw new Error(`Missing resolution for ${block.id}`);
+					}
+					return [block.id, resolveUnityConflictBlock(block, resolution)];
+				}),
+			);
+			await onApplyBlocks(resolvedBlocks);
+			return;
+		}
+
 		const resolvedContent = applyUnityConflictResolutions(document, resolutions);
 		await onApply(resolvedContent);
 	}
@@ -195,9 +213,7 @@
 
 				{#if resolution?.choice === "fields"}
 					<div class="unity-workbench__fields">
-						<p class="text-12 clr-text-2">
-							Choose ours or theirs for each changed YAML parameter.
-						</p>
+						<p class="text-12 clr-text-2">Choose ours or theirs for each changed YAML parameter.</p>
 						{#each block.fields as field, fieldIndex (field.id)}
 							{@const fieldResolution = resolution.fields?.[field.id]}
 							<div class="unity-field">

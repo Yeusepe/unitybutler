@@ -2,7 +2,10 @@ import { InjectionToken } from "@gitbutler/core/context";
 import { isDefined } from "@gitbutler/ui/utils/typeguards";
 import type { StackService } from "$lib/stacks/stackService.svelte";
 import type { BackendApi } from "$lib/state/backendApi";
-import type { StackStatusesWithBranchesV3 } from "$lib/upstream/types";
+import type {
+	StackStatusesWithBranchesV3,
+	UnityConflictResolutionInput,
+} from "$lib/upstream/types";
 
 type UpstreamStatusProgress = {
 	phase: string;
@@ -84,5 +87,9 @@ export class UpstreamIntegrationService {
 
 	integrateUpstream() {
 		return this.backendApi.endpoints.integrateUpstream.useMutation();
+	}
+
+	async applyUnityConflictResolution(projectId: string, input: UnityConflictResolutionInput) {
+		await this.backendApi.endpoints.applyUnityConflictResolution.mutate({ projectId, input });
 	}
 }

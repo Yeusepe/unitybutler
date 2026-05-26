@@ -579,7 +579,7 @@ if (!nativeBinding) {
   throw new Error(`Failed to load native binding`)
 }
 
-const { absorb, absorptionPlan, apply, assignHunk, branchDetails, branchDiff, changesInWorktree, changesInWorktreeWithPerm, commitAmend, commitCreate, commitDetailsWithLineStats, commitDiscard, commitInsertBlank, commitMove, commitMoveChangesBetween, commitReword, commitSquash, commitUncommit, commitUncommitChanges, forgeProvider, getRedoTargetSnapshot, getReview, getUndoTargetSnapshot, headInfo, listAvailableReviewTemplates, listBranches, listCiChecksAndUpdateCache, listProjectsStateless, listReviews, listReviewsForBranch, mergeReview, moveBranch, peelRestoreSnapshot, publishReview, pushStackLegacy, removeBranch, restoreSnapshotWithKind, reviewTemplate, setReviewAutoMerge, setReviewDraftiness, setReviewTemplate, tearOffBranch, treeChangeDiffs, unapplyStack, updateBranchName, updateReviewFooters, warmCiChecksCache, workspaceIntegrateUpstream, WatcherHandle, watcherStart } = nativeBinding
+const { absorb, absorptionPlan, apply, assignHunk, branchDetails, branchDiff, changesInWorktree, changesInWorktreeTrackedFileList, changesInWorktreeWithPerm, commitAmend, commitCreate, commitDetailsWithLineStats, commitDiscard, commitInsertBlank, commitMove, commitMoveChangesBetween, commitReword, commitSquash, commitUncommit, commitUncommitChanges, forgeProvider, getRedoTargetSnapshot, getReview, getUndoTargetSnapshot, headInfo, listAvailableReviewTemplates, listBranches, listCiChecksAndUpdateCache, listProjectsStateless, listReviews, listReviewsForBranch, mergeReview, moveBranch, peelRestoreSnapshot, publishReview, pushStackLegacy, pushStackToTarget, removeBranch, restoreSnapshotWithKind, reviewTemplate, runUnitySmartMerge, setReviewAutoMerge, setReviewDraftiness, setReviewTemplate, tearOffBranch, treeChangeDiffs, unapplyStack, unitySemanticDiff, unitySmartMergePreview, updateBranchName, updateReviewFooters, warmCiChecksCache, workspaceIntegrateUpstream, WatcherHandle, watcherStart } = nativeBinding
 export { absorb }
 export { absorptionPlan }
 export { apply }
@@ -587,6 +587,7 @@ export { assignHunk }
 export { branchDetails }
 export { branchDiff }
 export { changesInWorktree }
+export { changesInWorktreeTrackedFileList }
 export { changesInWorktreeWithPerm }
 export { commitAmend }
 export { commitCreate }
@@ -615,15 +616,19 @@ export { moveBranch }
 export { peelRestoreSnapshot }
 export { publishReview }
 export { pushStackLegacy }
+export { pushStackToTarget }
 export { removeBranch }
 export { restoreSnapshotWithKind }
 export { reviewTemplate }
+export { runUnitySmartMerge }
 export { setReviewAutoMerge }
 export { setReviewDraftiness }
 export { setReviewTemplate }
 export { tearOffBranch }
 export { treeChangeDiffs }
 export { unapplyStack }
+export { unitySemanticDiff }
+export { unitySmartMergePreview }
 export { updateBranchName }
 export { updateReviewFooters }
 export { warmCiChecksCache }

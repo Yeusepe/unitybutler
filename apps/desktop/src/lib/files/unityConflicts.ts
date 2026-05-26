@@ -40,7 +40,7 @@ type UnityConflictSection =
 export type UnityConflictDocument = {
 	path: string;
 	blocks: UnityConflictBlock[];
-	sections: UnityConflictSection[];
+	sections?: UnityConflictSection[];
 };
 
 const UNITY_YAML_EXTENSIONS = new Set([
@@ -135,6 +135,9 @@ export function applyUnityConflictResolutions(
 	document: UnityConflictDocument,
 	resolutions: Record<string, UnityConflictResolution>,
 ): string {
+	if (!document.sections) {
+		throw new Error("This Unity conflict document must be resolved by the backend session.");
+	}
 	return document.sections
 		.map((section) => {
 			if (section.type === "text") {
@@ -158,6 +161,22 @@ export function applyUnityConflictResolutions(
 			}
 		})
 		.join("");
+}
+
+export function resolveUnityConflictBlock(
+	block: UnityConflictBlock,
+	resolution: UnityConflictResolution,
+): string {
+	switch (resolution.choice) {
+		case "ours":
+			return block.ours;
+		case "theirs":
+			return block.theirs;
+		case "manual":
+			return resolution.manualText ?? "";
+		case "fields":
+			return applyFieldResolutions(block, resolution.fields ?? {});
+	}
 }
 
 function inferConflictLabel(

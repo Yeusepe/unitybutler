@@ -17,7 +17,7 @@ use gitbutler_branch_actions::{
     branch_upstream_integration::IntegrationStrategy,
     upstream_integration::{
         BaseBranchResolution, BaseBranchResolutionApproach, IntegrationOutcome, Resolution,
-        StackStatuses,
+        StackStatuses, UnityConflictResolutionInput,
     },
 };
 use gitbutler_git::GitContextExt as _;
@@ -745,6 +745,18 @@ pub async fn integrate_upstream(
     ctx.invalidate_workspace_cache()?;
 
     Ok(outcome)
+}
+
+#[but_api]
+#[instrument(err(Debug))]
+pub async fn apply_unity_conflict_resolution(
+    ctx: ThreadSafeContext,
+    input: UnityConflictResolutionInput,
+) -> Result<()> {
+    let mut ctx = ctx.into_thread_local();
+    gitbutler_branch_actions::apply_unity_conflict_resolution(&mut ctx, input)?;
+    ctx.invalidate_workspace_cache()?;
+    Ok(())
 }
 
 #[but_api]

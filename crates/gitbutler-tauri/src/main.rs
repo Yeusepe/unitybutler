@@ -385,6 +385,7 @@ fn main() -> anyhow::Result<()> {
                 upstream::upstream_integration_statuses,
                 upstream::worktree_conflict_preview,
                 upstream::integrate_upstream,
+                upstream::apply_unity_conflict_resolution,
                 legacy::virtual_branches::tauri_resolve_upstream_integration::resolve_upstream_integration,
                 legacy::stack::tauri_create_reference::create_reference,
                 legacy::stack::tauri_create_branch::create_branch,

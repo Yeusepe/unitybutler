@@ -18,6 +18,7 @@ use but_ctx::{Context, ProjectHandleOrLegacyProjectId, ThreadSafeContext};
 use gitbutler_branch_actions::base::BaseBranch;
 use gitbutler_branch_actions::upstream_integration::{
     BaseBranchResolution, IntegrationOutcome, Resolution, StackStatuses,
+    UnityConflictResolutionInput,
 };
 use tauri::{AppHandle, Emitter, EventTarget, Manager, Window};
 use tracing::instrument;
@@ -510,6 +511,19 @@ pub async fn integrate_upstream(
             Err(err.into())
         }
     }
+}
+
+#[tauri::command(async)]
+#[instrument(err(Debug))]
+#[allow(non_snake_case)]
+pub async fn apply_unity_conflict_resolution(
+    projectId: ProjectHandleOrLegacyProjectId,
+    input: UnityConflictResolutionInput,
+) -> Result<(), json::Error> {
+    let ctx = ThreadSafeContext::try_from(projectId.clone())?;
+    virtual_branches::apply_unity_conflict_resolution(ctx, input)
+        .await
+        .map_err(Into::into)
 }
 
 #[cfg(test)]

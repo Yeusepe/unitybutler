@@ -25,6 +25,17 @@ pub mod json {
     };
     use serde::{Deserialize, Serialize};
 
+    #[cfg(feature = "export-schema")]
+    but_schemars::register_sdk_type!(UnityChangeKind);
+    #[cfg(feature = "export-schema")]
+    but_schemars::register_sdk_type!(UnityFileKind);
+    #[cfg(feature = "export-schema")]
+    but_schemars::register_sdk_type!(UnityNodeKind);
+    #[cfg(feature = "export-schema")]
+    but_schemars::register_sdk_type!(UnitySemanticSummary);
+    #[cfg(feature = "export-schema")]
+    but_schemars::register_sdk_type!(UnitySemanticWarning);
+
     /// A 1-based line selected inside a diff hunk.
     #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
     #[cfg_attr(feature = "export-schema", derive(schemars::JsonSchema))]

@@ -5,6 +5,7 @@ import type {
 	ResolutionApproach,
 	StackStatus,
 } from "@gitbutler/but-sdk";
+import type { UnityConflictDocument } from "$lib/files/unityConflicts";
 
 export type StackStatusInfoV3 = { stack: Stack; status: StackStatus };
 
@@ -20,9 +21,39 @@ export type StackStatusesWithBranchesV3 =
 
 export type WorktreeConflictPreview = {
 	path: string;
-	base?: string | null;
-	local?: string | null;
-	upstream?: string | null;
+	mode: "mergePreview" | "chooseSide";
+	sessionId: string;
+	lfs: UnityConflictLfsInfo;
+	document?: UnityConflictDocument | null;
+	availableChoices: UnityConflictSide[];
+	message?: string | null;
+};
+
+export type UnityConflictSide = "local" | "upstream";
+
+export type UnityConflictLfsInfo = {
+	tracked: boolean;
+	base: UnityConflictSideState;
+	local: UnityConflictSideState;
+	upstream: UnityConflictSideState;
+};
+
+export type UnityConflictSideState = {
+	state: "textReady" | "missingLfsObject" | "binaryOrNonUtf8" | "pointerStillPresent" | "absent";
+	size?: number | null;
+};
+
+export type UnityConflictResolutionInput = {
+	sessionId: string;
+	path: string;
+	resolution:
+		| {
+				type: "blocks";
+				blocks: Record<string, string>;
+		  }
+		| {
+				type: UnityConflictSide;
+		  };
 };
 
 export function stackFullyIntegrated(stackStatus: StackStatus): boolean {

@@ -2,6 +2,7 @@ import IntegrateUpstreamModal from "$components/upstream/IntegrateUpstreamModal.
 import { BACKEND } from "$lib/backend";
 import { CLIPBOARD_SERVICE } from "$lib/backend/clipboard";
 import { URL_SERVICE } from "$lib/backend/url";
+import { BACKUP_SERVICE } from "$lib/backups/backupService.svelte";
 import { BASE_BRANCH_SERVICE } from "$lib/baseBranch/baseBranchService.svelte";
 import { FILE_SERVICE } from "$lib/files/fileService";
 import { DEFAULT_FORGE_FACTORY } from "$lib/forge/forgeFactory.svelte";
@@ -42,6 +43,14 @@ describe("IntegrateUpstreamModal", () => {
 		injectMap.clear();
 		injectMap.set(FILE_SERVICE, {
 			writeToWorkspace: vi.fn(),
+		});
+		injectMap.set(BACKUP_SERVICE, {
+			getSettings: vi.fn().mockResolvedValue({
+				backupDirectory: "",
+				backupBeforeUpstreamDefault: true,
+			}),
+			updateSettings: vi.fn().mockResolvedValue(undefined),
+			createBackup: vi.fn().mockResolvedValue(undefined),
 		});
 	});
 
@@ -269,6 +278,155 @@ describe("IntegrateUpstreamModal", () => {
 		).toBeInTheDocument();
 		expect(screen.getByText("Click to resolve")).toBeInTheDocument();
 		expect(screen.queryByText("scene resolver")).not.toBeInTheDocument();
+	});
+
+	test("stores backend scene conflict sessions instead of writing full scene contents", async () => {
+		const listen = vi.fn(() => async () => {});
+		const integrateMutation = vi.fn().mockResolvedValue({ deletedBranches: [] });
+		const applyUnityConflictResolution = vi.fn().mockResolvedValue(undefined);
+
+		injectMap.set(BACKEND, { listen });
+		injectMap.set(BASE_BRANCH_SERVICE, {
+			baseBranch: () => ({ response: undefined }),
+			refreshBaseBranch: vi.fn().mockResolvedValue(undefined),
+		});
+		injectMap.set(DEFAULT_FORGE_FACTORY, {
+			current: {
+				commitUrl: () => undefined,
+			},
+		});
+		injectMap.set(UPSTREAM_INTEGRATION_SERVICE, {
+			upstreamStatuses: vi.fn().mockResolvedValue({
+				type: "updatesRequired",
+				worktreeConflicts: ["Assets/Scenes/dealers.unity"],
+				subject: [],
+			}),
+			integrateUpstream: () => [integrateMutation],
+			resolveUpstreamIntegrationMutation: vi.fn(),
+			applyUnityConflictResolution,
+			worktreeConflictPreview: vi.fn().mockResolvedValue({
+				path: "Assets/Scenes/dealers.unity",
+				mode: "mergePreview",
+				sessionId: "session-1",
+				lfs: {
+					tracked: true,
+					base: { state: "textReady" },
+					local: { state: "textReady" },
+					upstream: { state: "textReady" },
+				},
+				availableChoices: ["local", "upstream"],
+				document: {
+					path: "Assets/Scenes/dealers.unity",
+					blocks: [
+						{
+							id: "conflict-1",
+							label: "m_Name",
+							context: "GameObject",
+							ours: "  m_Name: Local\n",
+							theirs: "  m_Name: Upstream\n",
+							fields: [],
+						},
+					],
+				},
+			}),
+		});
+		injectMap.set(STACK_SERVICE, {
+			commitChanges: vi.fn(() => ({ response: undefined })),
+		});
+		injectMap.set(URL_SERVICE, { openExternalUrl: vi.fn() });
+		injectMap.set(CLIPBOARD_SERVICE, { write: vi.fn() });
+
+		const user = userEvent.setup();
+		const { component } = render(IntegrateUpstreamModal, {
+			props: {
+				projectId: "project-1",
+			},
+		});
+
+		await (component as { show: () => Promise<void> }).show();
+		await user.click(
+			await screen.findByRole("button", { name: /Assets\/Scenes\/dealers\.unity/i }),
+		);
+		await user.click(await screen.findByRole("button", { name: "Use ours for conflict 1" }));
+		await user.click(screen.getByRole("button", { name: "Apply to scene" }));
+		expect(await screen.findByText("Resolution ready")).toBeInTheDocument();
+
+		await user.click(screen.getByRole("button", { name: "Update workspace" }));
+
+		await waitFor(() =>
+			expect(applyUnityConflictResolution).toHaveBeenCalledWith("project-1", {
+				sessionId: "session-1",
+				path: "Assets/Scenes/dealers.unity",
+				resolution: {
+					type: "blocks",
+					blocks: {
+						"conflict-1": "  m_Name: Local\n",
+					},
+				},
+			}),
+		);
+		expect(injectMap.get(FILE_SERVICE)).toEqual({ writeToWorkspace: expect.any(Function) });
+	});
+
+	test("allows explicit side choice when scene merge preview falls back", async () => {
+		const listen = vi.fn(() => async () => {});
+
+		injectMap.set(BACKEND, { listen });
+		injectMap.set(BASE_BRANCH_SERVICE, {
+			baseBranch: () => ({ response: undefined }),
+			refreshBaseBranch: vi.fn().mockResolvedValue(undefined),
+		});
+		injectMap.set(DEFAULT_FORGE_FACTORY, {
+			current: {
+				commitUrl: () => undefined,
+			},
+		});
+		injectMap.set(UPSTREAM_INTEGRATION_SERVICE, {
+			upstreamStatuses: vi.fn().mockResolvedValue({
+				type: "updatesRequired",
+				worktreeConflicts: ["Assets/Scenes/dealers.unity"],
+				subject: [],
+			}),
+			integrateUpstream: () => [vi.fn()],
+			resolveUpstreamIntegrationMutation: vi.fn(),
+			applyUnityConflictResolution: vi.fn(),
+			worktreeConflictPreview: vi.fn().mockResolvedValue({
+				path: "Assets/Scenes/dealers.unity",
+				mode: "chooseSide",
+				sessionId: "session-2",
+				lfs: {
+					tracked: true,
+					base: { state: "missingLfsObject", size: 500_000_000 },
+					local: { state: "textReady" },
+					upstream: { state: "textReady", size: 500_000_000 },
+				},
+				availableChoices: ["local", "upstream"],
+				message: "GitButler could not build a pointer-safe scene merge preview.",
+			}),
+		});
+		injectMap.set(STACK_SERVICE, {
+			commitChanges: vi.fn(() => ({ response: undefined })),
+		});
+		injectMap.set(URL_SERVICE, { openExternalUrl: vi.fn() });
+		injectMap.set(CLIPBOARD_SERVICE, { write: vi.fn() });
+
+		const user = userEvent.setup();
+		const { component } = render(IntegrateUpstreamModal, {
+			props: {
+				projectId: "project-1",
+			},
+		});
+
+		await (component as { show: () => Promise<void> }).show();
+		await user.click(
+			await screen.findByRole("button", { name: /Assets\/Scenes\/dealers\.unity/i }),
+		);
+		expect(
+			await screen.findByText("GitButler could not build a pointer-safe scene merge preview."),
+		).toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Use upstream" }));
+
+		expect(await screen.findByText("Resolution ready")).toBeInTheDocument();
 	});
 
 	test("expands incoming commits to show touched files", async () => {
